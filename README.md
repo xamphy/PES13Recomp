@@ -216,5 +216,5 @@ The architecture and plan are described in [docs/PLAN.md](docs/PLAN.md).
 The code in this repository is licensed under the [GNU General Public License v3.0](LICENSE).
 Third-party components keep their own licenses (see `thirdparty/` and `tools/`).
 
-Pro Evolution Soccer 2013 © Konami Digital Entertainment. This repository contains no game code,
-data or assets.
+Pro Evolution Soccer 2013 © Konami Digital Entertainment. This repository contains no game code or
+game files.
