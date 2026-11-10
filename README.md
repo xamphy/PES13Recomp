@@ -16,13 +16,12 @@
 <p align="center">
   <img src="docs/images/match.png" width="49%" alt="Exhibition match in play">
   <img src="docs/images/replay.png" width="49%" alt="Goalkeeper save in a replay">
-  <img src="docs/images/kickoff.png" width="49%" alt="Kick-off at Wembley">
-  <img src="docs/images/title.png" width="49%" alt="Title screen">
+  <img src="docs/images/kickoff.png" width="98%" alt="Kick-off at Wembley">
 </p>
 <p align="center"><sub>Running natively on Windows (Vulkan). Screenshots from the author's own copy of the game.</sub></p>
 
 > [!IMPORTANT]
-> **You must own the game.** This repository contains no game code, data or assets, and no
+> **You must own the game.** This repository contains no game code or game files, and no
 > builds of the game are distributed. You build it yourself from your own dump of the PES 2013
 > Xbox 360 disc (Europe). Pro Evolution Soccer 2013 belongs to Konami; this project is not
 > affiliated with Konami or Microsoft.
