@@ -40,7 +40,7 @@
 
 | | |
 |---|---|
-| **60 fps** | Runs at a locked 60 fps on Windows in matches (short dips during goal kicks and set pieces) |
+| **60 fps** | Matches run at a locked 60 fps on Windows; set pieces and goal kicks are locked to 30 fps by the game itself |
 | **Native code** | All ~67,000 PowerPC functions of the game are translated ahead of time to C++, so there is no emulator and no JIT. iPadOS forbids JIT. |
 | **Vulkan renderer** | Renders at the GPU command-processor level, with a model of the Xbox 360's EDRAM. Xenos shaders are translated to SPIR-V on first use and cached. |
 | **iPad** | Uses the same renderer, running on Metal through MoltenVK |
@@ -56,7 +56,7 @@
 | Recompiled code compiles | ✅ Done |
 | Boots on Windows | ✅ Done |
 | Graphics | ✅ Menus, training, matches and cutscenes render correctly |
-| Menus, input, matches | ✅ Windows: training, exhibition matches, sound, saves (60 fps; short dips during goal kicks and set pieces) |
+| Menus, input, matches | ✅ Windows: training, exhibition matches, sound, saves (60 fps; set pieces and goal kicks locked to 30 fps by the game) |
 | iPad | 🚧 The app builds; not yet run on a device |
 | Polish | 📋 Planned: anisotropic filtering, FXAA, resolution scaling, touch controls ([docs/improvements.md](docs/improvements.md)) |
 
