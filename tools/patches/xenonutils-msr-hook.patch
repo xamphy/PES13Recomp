@@ -1,0 +1,14 @@
+﻿diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 31a86cd..9b10a55 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -544,6 +544,9 @@ struct alignas(0x40) PPCContext
+ #endif
+ };
+ 
++// PES13 patch: called by recompiled `mtmsrd` when MSR[EE] changes (implemented by the runtime).
++void ppcOnMsrEEChange(PPCContext& ctx, uint32_t oldMsr);
++
+ inline uint8_t VectorMaskL[] =
+ {
+     0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,

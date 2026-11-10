@@ -1,0 +1,26 @@
+# Game data - never commit or share
+game/xex/*
+game/files/*
+!game/**/.keep
+
+# Recompiler output is derived from game code: generate it locally, never commit it.
+generated/*
+!generated/.keep
+
+# Recompiler logs
+config/*.log
+
+# Links created by cmake/xenia_shader.cmake (Windows junctions locally)
+thirdparty/xenia_third_party/
+
+# Stray output of a mistyped `> nul` in Git Bash
+/nul
+
+# Build
+build/
+*.ipa
+.DS_Store
+
+# Runtime user data (saves, cache partition)
+userdata/
+

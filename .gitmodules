@@ -1,0 +1,29 @@
+[submodule "tools/XenonRecomp"]
+	path = tools/XenonRecomp
+	url = https://github.com/xamphy/XenonRecomp.git
+	branch = pes13
+	ignore = untracked
+[submodule "tools/XenosRecomp"]
+	path = tools/XenosRecomp
+	url = https://github.com/xamphy/XenosRecomp.git
+	branch = pes13
+	ignore = untracked
+[submodule "thirdparty/fmt"]
+	path = thirdparty/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "thirdparty/glslang"]
+	path = thirdparty/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "thirdparty/volk"]
+	path = thirdparty/volk
+	url = https://github.com/zeux/volk.git
+[submodule "thirdparty/Vulkan-Headers"]
+	path = thirdparty/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "thirdparty/xenia"]
+	path = thirdparty/xenia
+	url = https://github.com/xenia-project/xenia.git
+	shallow = true
+[submodule "thirdparty/SDL"]
+	path = thirdparty/SDL
+	url = https://github.com/libsdl-org/SDL.git

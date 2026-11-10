@@ -1,0 +1,23 @@
+﻿diff --git a/XenonUtils/xex.cpp b/XenonUtils/xex.cpp
+index 4e79042..a00a52a 100644
+--- a/XenonUtils/xex.cpp
++++ b/XenonUtils/xex.cpp
+@@ -1,5 +1,6 @@
+ #include "xex.h"
+ #include "image.h"
++#include <algorithm>
+ #include <cassert>
+ #include <cstring>
+ #include <vector>
+@@ -180,7 +181,10 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
+                 imageSize += blocks[i].dataSize + blocks[i].zeroSize;
+             }
+ 
+-            result = std::make_unique<uint8_t[]>(imageSize);
++            // PES13 patch: the blocks can sum to less than security->imageSize, which is
++            // what image.size reports below. Allocate the larger of the two (make_unique
++            // zero-fills) so consumers copying image.size bytes don't read out of bounds.
++            result = std::make_unique<uint8_t[]>(std::max<size_t>(imageSize, security->imageSize));
+             auto* destData = result.get();
+ 
+             for (size_t i = 0; i < numBlocks; i++)

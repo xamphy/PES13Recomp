@@ -1,0 +1,215 @@
+﻿# XenonRecomp config for Pro Evolution Soccer 2013 (Europe, Xbox 360)
+# Paths are relative to this file.
+
+[main]
+file_path = "../game/xex/default.xex"
+out_directory_path = "../generated"
+switch_table_file_path = "pes13_switch_tables_all.toml"  # regenerate with tools\recomp.ps1
+
+# Keep everything in the guest context for the first working build;
+# try these optimizations only after the game runs correctly.
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Compiler register save/restore helpers (each signature matched exactly once in .text)
+restgprlr_14_address = 0x82A0FB80   # ld r14,-0x98(r1) ...
+savegprlr_14_address = 0x82A0FB30   # std r14,-0x98(r1) ...
+restfpr_14_address = 0x82A158DC     # lfd f14,-0x90(r12) ...
+savefpr_14_address = 0x82A15890     # stfd f14,-0x90(r12) ...
+restvmx_14_address = 0x82F30EC8     # li r11,-0x120; lvx v14,r11,r12 ...
+savevmx_14_address = 0x82F30C30     # li r11,-0x120; stvx v14,r11,r12 ...
+restvmx_64_address = 0x82F30F5C     # li r11,-0x400; lvx128 v64,r11,r12 ...
+savevmx_64_address = 0x82F30CC4     # li r11,-0x400; stvx128 v64,r11,r12 ...
+
+# CRT setjmp/longjmp (hand-written asm, no .pdata entries)
+longjmp_address = 0x82F300A0   # calls RtlUnwind, restores r14-r31/f14-f31/vregs via r7
+setjmp_address = 0x82F31160    # stores r13-r31, f14-f31 into jmp_buf at r3
+
+# Explicit boundaries for functions whose jump-table cases XenonRecomp split into separate functions.
+# Generated from recomp.log: size runs to the first blr/b after the furthest case label.
+functions = [
+    { address = 0x821B65C0, size = 0xD0 },  # switch 0x821B65EC, 25 cases out, pdata=none
+    { address = 0x821BB728, size = 0x138 },  # switch 0x821BB764, 17 cases out, pdata=none
+    { address = 0x821BB860, size = 0x138 },  # switch 0x821BB89C, 17 cases out, pdata=none
+    { address = 0x821BB998, size = 0x138 },  # switch 0x821BB9D4, 17 cases out, pdata=none
+    { address = 0x821F4030, size = 0xC0 },  # switch 0x821F4064, 12 cases out, pdata=none
+    { address = 0x82234B98, size = 0x150 },  # switch 0x82234BF4, 10 cases out, pdata=none
+    { address = 0x82259550, size = 0x104 },  # switch 0x82259588, 19 cases out, pdata=none; switch 0x822595B8, 19 cases out, pdata=none
+    { address = 0x82273DD0, size = 0x29C },  # switch 0x82273EA0, 20 cases out, pdata=none
+    { address = 0x822786C0, size = 0x5A0 },  # switch 0x8227872C, 107 cases out, pdata=none
+    { address = 0x82278CB8, size = 0x480 },  # switch 0x82278CF0, 107 cases out, pdata=none; tail at 0x82279108-0x82279134 (b 0x8227910C, Game Plan crash 2026-11-10)
+    { address = 0x822794A8, size = 0x70 },  # switch 0x822794D8, 28 cases out, pdata=none
+    { address = 0x822797D8, size = 0xA8 },  # switch 0x82279804, 14 cases out, pdata=none
+    { address = 0x82279888, size = 0x330 },  # size fixed 2026-11-10 (was 0x300: // ERROR branches), switch 0x822798BC, 14 cases out, pdata=none
+    { address = 0x8227B1F0, size = 0x178 },  # switch 0x8227B224, 77 cases out, pdata=none
+    { address = 0x8227B618, size = 0x624 },  # switch 0x8227B644, 121 cases out, pdata=none
+    { address = 0x8227BC40, size = 0x50C },  # switch 0x8227BC6C, 121 cases out, pdata=none
+    { address = 0x822825B0, size = 0x118 },  # switch 0x822825DC, 32 cases out, pdata=none
+    { address = 0x822826C8, size = 0x128 },  # switch 0x822826F8, 47 cases out, pdata=none
+    { address = 0x8228C618, size = 0xF8 },  # switch 0x8228C644, 73 cases out, pdata=none
+    { address = 0x82296CC0, size = 0xA0 },  # switch 0x82296CEC, 41 cases out, pdata=none
+    { address = 0x82296D60, size = 0xA4 },  # switch 0x82296D90, 16 cases out, pdata=none
+    { address = 0x82297E10, size = 0x88 },  # switch 0x82297E40, 10 cases out, pdata=none
+    { address = 0x82298BB0, size = 0x184 },  # switch 0x82298BDC, 18 cases out, pdata=none
+    { address = 0x822C9478, size = 0xB4 },  # switch 0x822C94A8, 20 cases out, pdata=none
+    { address = 0x822CA998, size = 0xC50 },  # switch 0x822CA9E4, 35 cases out, pdata=none
+    { address = 0x822CD4B0, size = 0xB4 },  # switch 0x822CD4E0, 20 cases out, pdata=none
+    { address = 0x82311C18, size = 0xA8 },  # switch 0x82311C50, 12 cases out, pdata=none
+    { address = 0x823147E0, size = 0x1F0 },  # switch 0x8231480C, 29 cases out, pdata=none
+    { address = 0x823317F8, size = 0x74 },  # switch 0x82331838, 12 cases out, pdata=none
+    { address = 0x8235A608, size = 0x2A4 },  # switch 0x8235A648, 88 cases out, pdata=none
+    { address = 0x8235AB58, size = 0x140 },  # switch 0x8235AB88, 19 cases out, pdata=none
+    { address = 0x8235AC98, size = 0x1B0 },  # switch 0x8235ACC4, 41 cases out, pdata=none
+    { address = 0x82368FB0, size = 0xA0 },  # switch 0x82368FE4, 12 cases out, pdata=none
+    { address = 0x82369050, size = 0x138 },  # switch 0x82369080, 12 cases out, pdata=none
+    { address = 0x82369188, size = 0xE8 },  # switch 0x823691B8, 12 cases out, pdata=none
+    { address = 0x823853D8, size = 0x9C },  # switch 0x82385414, 11 cases out, pdata=none
+    { address = 0x823C3058, size = 0x38C },  # size fixed 2026-11-10 (was 0x37C: // ERROR branches), switch 0x823C308C, 90 cases out, pdata=none
+    { address = 0x823F2878, size = 0xBC },  # size fixed 2026-11-10 (was 0xA0: // ERROR branches), switch 0x823F28AC, 13 cases out, pdata=none
+    { address = 0x82411128, size = 0x36C },  # switch 0x82411158, 47 cases out, pdata=none
+    { address = 0x82411AE0, size = 0x54 },  # switch 0x82411B18, 20 cases out, pdata=none
+    { address = 0x82412E18, size = 0x64 },  # switch 0x82412E60, 20 cases out, pdata=none
+    { address = 0x8242B448, size = 0x10C },  # switch 0x8242B488, 12 cases out, pdata=none
+    { address = 0x8243D0F0, size = 0x1F8 },  # switch 0x8243D124; tail at 0x8243D230 (loop target, no callers) ends at blr 0x8243D2E4
+    { address = 0x82469858, size = 0x12C },  # switch 0x8246988C, 10 cases out, pdata=none
+    { address = 0x8246B668, size = 0x24C },  # switch 0x8246B6A4, 10 cases out, pdata=none
+    { address = 0x8247D850, size = 0x198 },  # switch 0x8247D8A4, 19 cases out, pdata=none
+    { address = 0x82498148, size = 0x254 },  # switch 0x8249818C, 30 cases out, pdata=none
+    { address = 0x82498268, size = 0x134 },  # switch 0x824982A4, 15 cases out, pdata=none
+    { address = 0x824983A0, size = 0xB4 },  # switch 0x824983F8, 28 cases out, pdata=none
+    { address = 0x82506DA8, size = 0x104 },  # switch 0x82506E34, 21 cases out, pdata=none
+    { address = 0x82531F90, size = 0xAC },  # switch 0x82531FC0, 15 cases out, pdata=none
+    { address = 0x82628010, size = 0x8DC },  # switches 0x826282B0 + 0x826283C8 (0x82628398 is a block inside this function, not a function)
+    { address = 0x826F9D60, size = 0x98 },  # switch 0x826F9D90, 12 cases out, pdata=none
+    { address = 0x826F9DF8, size = 0x98 },  # switch 0x826F9E28, 12 cases out, pdata=none
+    { address = 0x826FF2C8, size = 0x228 },  # size fixed 2026-11-10 (was 0x180: // ERROR branches), switch 0x826FF30C, 50 cases out, pdata=none
+    { address = 0x826FFE00, size = 0x228 },  # size fixed 2026-11-10 (was 0x180: // ERROR branches), switch 0x826FFE44, 50 cases out, pdata=none
+    { address = 0x82701990, size = 0x2C8 },  # switch 0x827019C4; case blocks (oris r3,r3,N; blr) run to 0x82701C58
+    { address = 0x8270CDD8, size = 0x128 },  # switch 0x8270CE10, 21 cases out, pdata=none
+    { address = 0x8275F158, size = 0x60 },  # switch 0x8275F194, 27 cases out, pdata=none
+    { address = 0x8276A6A0, size = 0x144 },  # switch 0x8276A6D0, 41 cases out, pdata=none
+    { address = 0x8276A7E8, size = 0x150 },  # switch 0x8276A814, 45 cases out, pdata=none
+    { address = 0x82773138, size = 0x178 },  # switch 0x82773184, 47 cases out, pdata=none
+    { address = 0x827D1870, size = 0x230 },  # switch 0x827D18A4, 11 cases out, pdata=none
+    { address = 0x827D9810, size = 0x88 },  # switch 0x827D9858, 10 cases out, pdata=none
+    { address = 0x827F7CF8, size = 0xEC },  # switch 0x827F7D30, 26 cases out, pdata=none
+    { address = 0x82881BE0, size = 0x104 },  # switch 0x82881C18, 47 cases out, pdata=none
+    { address = 0x82881D38, size = 0xD8 },  # switch 0x82881D68, 47 cases out, pdata=none
+    { address = 0x82881E10, size = 0xD8 },  # switch 0x82881E40, 47 cases out, pdata=none
+    { address = 0x82881EE8, size = 0xD8 },  # switch 0x82881F18, 47 cases out, pdata=none
+    { address = 0x82881FC0, size = 0xD8 },  # switch 0x82881FF0, 47 cases out, pdata=none
+    { address = 0x828C0E08, size = 0xDC },  # switch 0x828C0E3C, 33 cases out, pdata=none
+    { address = 0x828C92A8, size = 0xF0 },  # switch 0x828C9344, 13 cases out, pdata=none; switch 0x828C9378, 72 cases out, pdata=none
+    { address = 0x828D4098, size = 0x14C },  # switch 0x828D40C8, 32 cases out, pdata=none
+    { address = 0x828D41E8, size = 0x118 },  # switch 0x828D4218, 32 cases out, pdata=none
+    { address = 0x828D4300, size = 0x10C },  # switch 0x828D4330, 22 cases out, pdata=none
+    { address = 0x828D4410, size = 0xC8 },  # switch 0x828D4440, 22 cases out, pdata=none
+    { address = 0x828DED78, size = 0xA4 },  # switch 0x828DEDBC, 13 cases out, pdata=none
+    { address = 0x828DEE20, size = 0x260 },  # switch 0x828DEE5C, 44 cases out, pdata=none
+    { address = 0x828DF3A0, size = 0x280 },  # switch 0x828DF3F0, 22 cases out, pdata=none
+    { address = 0x828DF620, size = 0x1B0 },  # switch 0x828DF658, 44 cases out, pdata=none
+    { address = 0x828DF7E8, size = 0xCC },  # switch 0x828DF818, 22 cases out, pdata=none
+    { address = 0x828DF8B8, size = 0x10C },  # switch 0x828DF8E8, 32 cases out, pdata=none
+    # From tools/find-extra-switches.ps1: case blocks of jump tables XenonAnalyse missed
+    { address = 0x8228C710, size = 0x348 },  # switch 0x8228C710 (96 cases) runs to 0x8228CA4C
+    { address = 0x82314610, size = 0x1D0 },  # switch 0x82314610 (27 cases) runs to 0x823147DC
+    { address = 0x82403C48, size = 0x128 },  # switch 0x82403C48 (55 cases) runs to 0x82403D68
+    { address = 0x828F87B8, size = 0x15C },  # size fixed 2026-11-10 (was 0x150: // ERROR branches), switch 0x828F87BC (12 cases) runs to 0x828F88EC
+    { address = 0x82948CF0, size = 0x80 },   # switch 0x82948CF0 (10 cases) runs to 0x82948D68
+    { address = 0x8299B590, size = 0x148 },  # switch 0x8299B590 (42 cases) runs to 0x8299B6D4
+    { address = 0x828F5860, size = 0x18 },   # 6-insn stub ending in b 0x828F5878; auto-analysis ran past it into the switch
+    { address = 0x828F5878, size = 0xBF0 },  # switch 0x828F5990, 16 cases out, pdata=0xBF0
+    { address = 0x828F8340, size = 0x158 },  # switch 0x828F8370, 12 cases out, pdata=none
+    { address = 0x828F8688, size = 0x12C },  # size fixed 2026-11-10 (was 0x120: // ERROR branches), switch 0x828F86B8, 12 cases out, pdata=none
+    { address = 0x828FB3F8, size = 0x94 },  # switch 0x828FB428, 12 cases out, pdata=none
+    { address = 0x829170F8, size = 0x1EC },  # size fixed 2026-11-10 (was 0x1CC: // ERROR branches), switch 0x82917128, 24 cases out, pdata=none
+    { address = 0x8299E230, size = 0xC0 },  # switch 0x8299E264, 17 cases out, pdata=none
+    { address = 0x829A4D60, size = 0x150 },  # switch 0x829A4DAC, 41 cases out, pdata=none
+    { address = 0x829B9860, size = 0xBC },  # switch 0x829B98DC, 12 cases out, pdata=none
+    { address = 0x829E13B8, size = 0x60 },  # switch 0x829E13EC, 54 cases out, pdata=none
+    { address = 0x829EEF60, size = 0xD4 },  # switch 0x829EEF90, 31 cases out, pdata=none
+    { address = 0x829EF038, size = 0xD4 },  # switch 0x829EF068, 31 cases out, pdata=none
+    { address = 0x82A61FC0, size = 0x224 },  # switch 0x82A620D0, 11 cases out, pdata=none
+    { address = 0x82ADBD38, size = 0x110 },  # switch 0x82ADBD78, 13 cases out, pdata=none
+    { address = 0x82B3B200, size = 0x80 },  # switch 0x82B3B238, 42 cases out, pdata=none
+    { address = 0x82C29AA0, size = 0x68 },  # switch 0x82C29ACC, 62 cases out, pdata=none
+    { address = 0x82C29B08, size = 0x64 },  # switch 0x82C29B38, 37 cases out, pdata=none
+    { address = 0x82C29B70, size = 0x5C },  # switch 0x82C29BA0, 37 cases out, pdata=none
+    { address = 0x82C29BD0, size = 0x198 },  # switch 0x82C29C00, 62 cases out, pdata=none
+    { address = 0x82C29D68, size = 0x16C },  # switch 0x82C29D9C, 37 cases out, pdata=none
+    { address = 0x82CCB0E0, size = 0x10C },  # switch 0x82CCB10C, 31 cases out, pdata=none
+    { address = 0x82D049E0, size = 0xD8 },  # switch 0x82D04A24, 17 cases out, pdata=none
+    { address = 0x82D21500, size = 0x88 },  # switch 0x82D2152C, 11 cases out, pdata=none
+    { address = 0x82D215D0, size = 0x408 },  # switch 0x82D215FC, 124 cases out, pdata=none
+    { address = 0x82D219D8, size = 0x408 },  # switch 0x82D21A04, 124 cases out, pdata=none
+    { address = 0x82D21DE0, size = 0x408 },  # switch 0x82D21E0C, 124 cases out, pdata=none
+    { address = 0x82D47088, size = 0x8C },  # switch 0x82D470B8, 12 cases out, pdata=none
+    { address = 0x82D7A5F8, size = 0x78 },  # switch 0x82D7A62C, 16 cases out, pdata=none
+    { address = 0x82D84480, size = 0xCC },  # switch 0x82D844AC, 10 cases out, pdata=none
+    { address = 0x82DD2140, size = 0xA8 },  # switch 0x82DD216C, 15 cases out, pdata=none
+    { address = 0x82DD5548, size = 0xD0 },  # switch 0x82DD5578, 19 cases out, pdata=none
+    { address = 0x82DF3690, size = 0xA8 },  # switch 0x82DF36BC, 11 cases out, pdata=none
+    { address = 0x82DF4CB0, size = 0x88 },  # switch 0x82DF4CE4, 10 cases out, pdata=none
+    { address = 0x82DF7F18, size = 0x1F8 },  # switch 0x82DF7F48, 15 cases out, pdata=none, CLIPPED at next pdata 0x82DF8110
+    { address = 0x82E021E8, size = 0xA8 },  # switch 0x82E02214, 11 cases out, pdata=none
+    { address = 0x82E0CDE8, size = 0xE0 },  # switch 0x82E0CE20, 20 cases out, pdata=none
+    { address = 0x82E2F130, size = 0x98 },  # switch 0x82E2F174, 10 cases out, pdata=none
+    { address = 0x82E62DB8, size = 0xA4 },  # switch 0x82E62DE8, 14 cases out, pdata=none
+    { address = 0x82E62E60, size = 0xA4 },  # switch 0x82E62E90, 14 cases out, pdata=none
+    { address = 0x82E62F08, size = 0xA4 },  # switch 0x82E62F38, 14 cases out, pdata=none
+    { address = 0x82E6A2B8, size = 0x238 },  # switch 0x82E6A2F0, 29 cases out, pdata=none
+    { address = 0x82E6AB98, size = 0x2CC },  # switch 0x82E6ABD0, 29 cases out, pdata=none
+    { address = 0x82E7B0C8, size = 0x41C },  # size fixed 2026-11-10 (was 0x3F0: // ERROR branches), switch 0x82E7B100, 95 cases out, pdata=none
+    { address = 0x82E7B4E8, size = 0x10C },  # switch 0x82E7B518, 22 cases out, pdata=none
+    { address = 0x82E7B5F8, size = 0xE0 },  # switch 0x82E7B628, 20 cases out, pdata=none
+    { address = 0x82E7B6D8, size = 0x50C },  # switch 0x82E7B704, 121 cases out, pdata=none
+    { address = 0x82EC27A0, size = 0x60 },  # switch 0x82EC27D4, 72 cases out, pdata=none
+    { address = 0x82EE5378, size = 0x1FC },  # switch 0x82EE53B0, 175 cases out, pdata=none
+    { address = 0x82F6AAE8, size = 0x2E8 },  # switch 0x82F6AB18, 13 cases out, pdata=none
+    { address = 0x82FAE350, size = 0x270 },  # switch 0x82FAE3A0, 59 cases out, pdata=none
+    { address = 0x82FB4D60, size = 0x8C },  # switch 0x82FB4DB8, 21 cases out, pdata=none
+    { address = 0x82FB6430, size = 0xD4 },  # switch 0x82FB6464, 21 cases out, pdata=none
+    { address = 0x82FB6508, size = 0x118 },  # switch 0x82FB656C, 18 cases out, pdata=none
+    { address = 0x82FB6620, size = 0xC4 },  # switch 0x82FB6660, 12 cases out, pdata=none
+    { address = 0x82FB66E8, size = 0xB0 },  # switch 0x82FB6720, 21 cases out, pdata=none
+    { address = 0x82FB6798, size = 0xD8 },  # switch 0x82FB67FC, 11 cases out, pdata=none
+    { address = 0x82FB6870, size = 0xE8 },  # switch 0x82FB68B4, 19 cases out, pdata=none
+    { address = 0x82FC2020, size = 0x8C },  # switch 0x82FC2050, 12 cases out, pdata=none
+    { address = 0x82FC4898, size = 0xA8 },  # size fixed 2026-11-10 (was 0x9C: // ERROR branches), switch 0x82FC48C8, 13 cases out, pdata=none
+    { address = 0x82FC49B8, size = 0xF8 },  # switch 0x82FC49E4, 96 cases out, pdata=none
+    { address = 0x82FC4AB0, size = 0x104 },  # switch 0x82FC4AE0, 26 cases out, pdata=none
+    { address = 0x830267B8, size = 0x20C },  # switch 0x830267EC, 31 cases out, pdata=none
+    { address = 0x83030D38, size = 0x64 },  # switch 0x83030D68, 21 cases out, pdata=none
+    { address = 0x83069D50, size = 0x114 },  # switch 0x83069D80, 28 cases out, pdata=none
+    { address = 0x83069E70, size = 0xA4 },  # switch 0x83069EA0, 14 cases out, pdata=none
+    { address = 0x83069F20, size = 0x104 },  # switch 0x83069F50, 26 cases out, pdata=none
+    { address = 0x8306A030, size = 0x124 },  # switch 0x8306A070, 28 cases out, pdata=none
+    { address = 0x8306A158, size = 0xDC },  # switch 0x8306A188, 14 cases out, pdata=none
+    { address = 0x8306A238, size = 0x16C },  # switch 0x8306A268, 26 cases out, pdata=none
+    { address = 0x83095CB8, size = 0x98 },  # switch 0x83095CEC, 12 cases out, pdata=none
+    { address = 0x83095D50, size = 0xEC },  # switch 0x83095D80, 31 cases out, pdata=none
+    { address = 0x83096BA0, size = 0x1C8 },  # switch 0x83096C04, 18 cases out, pdata=none
+    { address = 0x83096C08, size = 0x160 },  # size fixed 2026-11-10 (was 0x8C: // ERROR branches), switch 0x83096C38, 12 cases out, pdata=none
+    { address = 0x83096C94, size = 0xD4 },  # size fixed 2026-11-10 (was 0x8C: // ERROR branches), switch 0x83096CC4, 15 cases out, pdata=none
+    { address = 0x830A5468, size = 0x274 },  # switch 0x830A549C, 13 cases out, pdata=none
+    { address = 0x830A9FD8, size = 0x2F4 },  # size fixed 2026-11-10 (was 0xE4: // ERROR branches), switch 0x830AA050, 12 cases out, pdata=none
+    { address = 0x830AA0BC, size = 0x210 },  # size fixed 2026-11-10 (was 0xD0: its tail at 0x830AA18C is now inside sub_830A9FD8), switch 0x830AA120, 12 cases out, pdata=none
+    { address = 0x830CEF98, size = 0x98 },  # switch 0x830CEFCC, 12 cases out, pdata=none
+    { address = 0x8312B8D8, size = 0x98 },  # switch 0x8312B914, 12 cases out, pdata=none
+    { address = 0x8314A2D0, size = 0xEC },  # size fixed 2026-11-10 (was 0xD8: // ERROR branches), switch 0x8314A31C, 10 cases out, pdata=none
+    { address = 0x8317F770, size = 0x12C },  # switch 0x8317F7F4, 14 cases out, pdata=none
+    { address = 0x831911D0, size = 0xF8 },  # switch 0x8319120C, 35 cases out, pdata=none
+    { address = 0x831A79C0, size = 0x27C },  # switch 0x831A79FC, 26 cases out, pdata=none
+]
+
+# Skip zero padding between functions so it isn't analysed as code
+invalid_instructions = [
+    { data = 0x00000000, size = 4 },
+]
+

@@ -1,0 +1,23 @@
+diff --git a/XenonAnalyse/function.cpp b/XenonAnalyse/function.cpp
+index 34add40..dd16e90 100644
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -180,13 +180,15 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
+                 }
+                 else if (op == PPC_OP_CTR)
+                 {
+-                    // 5th bit of BO tells cpu to ignore the counter, which is a blr/bctr otherwise it's conditional
+-                    const bool conditional = !(PPC_BO(instruction) & 0x10);
++                    // BO 0x10 = ignore the CR bit, BO 0x04 = ignore (don't decrement) CTR. Only with
++                    // both set is it an unconditional blr/bctr; bdzlr/bdnzlr (BO 0x12/0x10) are
++                    // conditional returns and the code after them still belongs to the function.
++                    const bool conditional = (PPC_BO(instruction) & 0x14) != 0x14;
+                     if (conditional)
+                     {
+                         // right block's just going to return
+                         const size_t lBase = (addr - base) + 4;
+-                        size_t lBlock = fn.SearchBlock(lBase);
++                        size_t lBlock = fn.SearchBlock(base + lBase);
+                         if (lBlock == -1)
+                         {
+                             blocks.emplace_back(lBase, 0);

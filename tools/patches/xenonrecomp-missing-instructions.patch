@@ -1,0 +1,204 @@
+﻿diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..5b21420 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1,4 +1,4 @@
+-#include "pch.h"
++﻿#include "pch.h"
+ #include "recompiler.h"
+ #include <xex_patcher.h>
+ 
+@@ -827,23 +827,24 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_DIVD:
+-        println("\t{}.s64 = {}.s64 / {}.s64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        // PES13 patch: x86 traps on /0 and INT_MIN/-1; PowerPC just returns an undefined value.
++        println("\t{}.s64 = {}.s64 == 0 ? 0 : ({}.s64 == INT64_MIN && {}.s64 == -1) ? INT64_MIN : {}.s64 / {}.s64;", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+ 
+     case PPC_INST_DIVDU:
+-        println("\t{}.u64 = {}.u64 / {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = {}.u64 == 0 ? 0 : {}.u64 / {}.u64;", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVW:
+-        println("\t{}.s32 = {}.s32 / {}.s32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.s32 = {}.s32 == 0 ? 0 : ({}.s32 == INT32_MIN && {}.s32 == -1) ? INT32_MIN : {}.s32 / {}.s32;", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVWU:
+-        println("\t{}.u32 = {}.u32 / {}.u32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u32 = {}.u32 == 0 ? 0 : {}.u32 / {}.u32;", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+@@ -1133,6 +1134,7 @@ bool Recompiler::Recompile(
+         println("\t{}.s64 = {};", r(insn.operands[0]), int32_t(insn.operands[1] << 16));
+         break;
+ 
++    case PPC_INST_LVEHX: // PES13 patch: element load; loading the whole aligned vector is a valid implementation
+     case PPC_INST_LVEWX:
+     case PPC_INST_LVEWX128:
+     case PPC_INST_LVX:
+@@ -1292,7 +1294,12 @@ bool Recompiler::Recompile(
+ 
+     case PPC_INST_MTMSRD:
+         if (!config.skipMsr)
+-            println("\tctx.msr = ({}.u32 & 0x8020) | (ctx.msr & ~0x8020);", r(insn.operands[0]));
++        {
++            // PES13 patch: notify the runtime when MSR[EE] (external interrupt enable) changes,
++            // so interrupt handlers for this CPU can be kept out of interrupts-disabled regions.
++            println("\t{{ const uint32_t oldMsr = ctx.msr; ctx.msr = ({}.u32 & 0x8020) | (ctx.msr & ~0x8020);", r(insn.operands[0]));
++            println("\t  if ((oldMsr ^ ctx.msr) & 0x8000) ppcOnMsrEEChange(ctx, oldMsr); }}");
++        }
+         break;
+ 
+     case PPC_INST_MTXER:
+@@ -1369,6 +1376,9 @@ bool Recompiler::Recompile(
+ 
+     case PPC_INST_RLDICL:
+         println("\t{}.u64 = __builtin_rotateleft64({}.u64, {}) & 0x{:X};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2], ComputeMask(insn.operands[3], 63));
++        // PES13 patch: rldicl. is a 64-bit op, so CR0 reflects the full 64-bit result
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_RLDICR:
+@@ -1710,6 +1720,132 @@ bool Recompiler::Recompile(
+         println("\t{}.s64 = {} - {}.s64;", r(insn.operands[0]), int32_t(insn.operands[2]), r(insn.operands[1]));
+         break;
+ 
++    // ---- PES13 patch: instructions not used by the original target game ----
++
++    case PPC_INST_SUBFZE:
++        // rD = ~rA + CA; carry out only when rA == 0 and CA == 1
++        println("\t{}.u8 = (~{}.u32 + {}.ca) < {}.ca;", temp(), r(insn.operands[1]), xer(), xer());
++        println("\t{}.u64 = ~{}.u64 + {}.ca;", r(insn.operands[0]), r(insn.operands[1]), xer());
++        println("\t{}.ca = {}.u8;", xer(), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_ADDME:
++        // rD = rA + CA - 1; carry out unless rA == 0 and CA == 0
++        println("\t{}.u8 = ({}.u32 != 0) | {}.ca;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64 + {}.ca - 1;", r(insn.operands[0]), r(insn.operands[1]), xer());
++        println("\t{}.ca = {}.u8;", xer(), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_ADDC:
++        println("\t{}.ca = {}.u32 + {}.u32 < {}.u32;", xer(), r(insn.operands[1]), r(insn.operands[2]), r(insn.operands[1]));
++        println("\t{}.u64 = {}.u64 + {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_EQV:
++        println("\t{}.u64 = ~({}.u64 ^ {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_BDZF:
++    case PPC_INST_BDNZT:
++    {
++        static constexpr const char* crBits[] = { "lt", "gt", "eq", "so" };
++        const bool isBdzf = insn.opcode->id == PPC_INST_BDZF;
++        println("\t--{}.u64;", ctr());
++        println("\tif ({}.u32 {} 0 && {}{}.{}) goto loc_{:X};", ctr(), isBdzf ? "==" : "!=",
++            isBdzf ? "!" : "", cr(insn.operands[0] / 4), crBits[insn.operands[0] % 4], insn.operands[1]);
++        break;
++    }
++
++    case PPC_INST_VPKSWSS128:
++        // operands swapped to account for the full-vector endian reversal (same as vpkshus128)
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packs_epi32(simde_mm_load_si128((simde__m128i*){}.s32), simde_mm_load_si128((simde__m128i*){}.s32)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++
++    // load/store with update, displacement form: op rD, d(rA)
++    case PPC_INST_LHZU:
++    case PPC_INST_LHAU:
++    case PPC_INST_LFSU:
++    case PPC_INST_LFDU:
++    case PPC_INST_STHU:
++    case PPC_INST_STFSU:
++    case PPC_INST_STFDU:
++    // load/store with update, indexed form: op rD, rA, rB
++    case PPC_INST_LBZUX:
++    case PPC_INST_LHZUX:
++    case PPC_INST_LHAUX:
++    case PPC_INST_LWZUX:
++    case PPC_INST_LDUX:
++    case PPC_INST_LFSUX:
++    case PPC_INST_LFDUX:
++    case PPC_INST_STBUX:
++    case PPC_INST_STHUX:
++    case PPC_INST_STDUX:
++    case PPC_INST_STFSUX:
++    case PPC_INST_STFDUX:
++    {
++        const auto id = insn.opcode->id;
++        const bool indexed = id == PPC_INST_LBZUX || id == PPC_INST_LHZUX || id == PPC_INST_LHAUX || id == PPC_INST_LWZUX ||
++            id == PPC_INST_LDUX || id == PPC_INST_LFSUX || id == PPC_INST_LFDUX || id == PPC_INST_STBUX ||
++            id == PPC_INST_STHUX || id == PPC_INST_STDUX || id == PPC_INST_STFSUX || id == PPC_INST_STFDUX;
++        const uint32_t rA = indexed ? insn.operands[1] : insn.operands[2];
++
++        if (indexed)
++            println("\t{} = {}.u32 + {}.u32;", ea(), r(rA), r(insn.operands[2]));
++        else
++            println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(rA));
++
++        const auto d = insn.operands[0];
++        switch (id)
++        {
++        case PPC_INST_LBZUX: println("\t{}.u64 = PPC_LOAD_U8({});", r(d), ea()); break;
++        case PPC_INST_LHZU:
++        case PPC_INST_LHZUX: println("\t{}.u64 = PPC_LOAD_U16({});", r(d), ea()); break;
++        case PPC_INST_LHAU:
++        case PPC_INST_LHAUX: println("\t{}.s64 = int16_t(PPC_LOAD_U16({}));", r(d), ea()); break;
++        case PPC_INST_LWZUX: println("\t{}.u64 = PPC_LOAD_U32({});", r(d), ea()); break;
++        case PPC_INST_LDUX:  println("\t{}.u64 = PPC_LOAD_U64({});", r(d), ea()); break;
++        case PPC_INST_LFSU:
++        case PPC_INST_LFSUX:
++            printSetFlushMode(false);
++            println("\t{}.u32 = PPC_LOAD_U32({});", temp(), ea());
++            println("\t{}.f64 = double({}.f32);", f(d), temp());
++            break;
++        case PPC_INST_LFDU:
++        case PPC_INST_LFDUX:
++            printSetFlushMode(false);
++            println("\t{}.u64 = PPC_LOAD_U64({});", f(d), ea());
++            break;
++        case PPC_INST_STBUX: println("\tPPC_STORE_U8({}, {}.u8);", ea(), r(d)); break;
++        case PPC_INST_STHU:
++        case PPC_INST_STHUX: println("\tPPC_STORE_U16({}, {}.u16);", ea(), r(d)); break;
++        case PPC_INST_STDUX: println("\tPPC_STORE_U64({}, {}.u64);", ea(), r(d)); break;
++        case PPC_INST_STFSU:
++        case PPC_INST_STFSUX:
++            printSetFlushMode(false);
++            println("\t{}.f32 = float({}.f64);", temp(), f(d));
++            println("\tPPC_STORE_U32({}, {}.u32);", ea(), temp());
++            break;
++        case PPC_INST_STFDU:
++        case PPC_INST_STFDUX:
++            printSetFlushMode(false);
++            println("\tPPC_STORE_U64({}, {}.u64);", ea(), f(d));
++            break;
++        }
++
++        println("\t{}.u32 = {};", r(rA), ea());
++        break;
++    }
++
++    // ---- end PES13 patch ----
++
+     case PPC_INST_SYNC:
+         // no op
+         break;
