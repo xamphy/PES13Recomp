@@ -1,7 +1,9 @@
 # Running PES 2013 on the iPad (from a Windows PC, no Mac)
 
-Status (2026-11-09): the iPadOS app **builds** (CI produces `pes13.ipa`) but has **never run on a
-device** yet. Expect problems on the first launch; the logs below are how we find them.
+Status (2026-11-11): first run on a device (M2 iPad Air, installed with Sideloadly and a free Apple ID).
+The app **launches**, renders and plays sound up to the title screen. Performance has **not been
+tested** yet, and there are no touch controls yet: pair a Bluetooth controller first. If something
+goes wrong, the logs below are how we find it.
 
 ## 1. Get the .ipa
 
@@ -22,11 +24,15 @@ MoltenVK. The result is `pes13.ipa` (~26 MB).
 5. A free Apple ID signs apps for **7 days**; AltStore refreshes them when the PC with AltServer is on
    the same Wi-Fi.
 
+**Sideloadly** works too. Make sure the **iPad** is selected in its device list: Apple Silicon Macs
+run iPad apps, so with a Mac on the same network it can install to the Mac instead.
+
 **Entitlements:** the app asks for `extended-virtual-addressing` (the runtime reserves 4 GB of address
 space for the Xbox 360 memory) and `increased-memory-limit` (a match needs ~1 GB). A free Apple ID may
 not be allowed to keep them - AltStore then drops them. If the app quits immediately, check
 `pes13.err.log` for `failed to reserve 4 GB guest address space`: that means the entitlement was
 dropped, and we either need a paid developer account or to shrink the reservation (work on our side).
+On the first device test (free Apple ID, Sideloadly) the reservation succeeded.
 
 ## 3. Copy the game files
 

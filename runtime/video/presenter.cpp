@@ -273,9 +273,23 @@ namespace Video
         VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 #ifdef __APPLE__
         // MoltenVK is a "portability" implementation: the loader lists it only when asked to.
-        instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        // Without a loader (iPadOS: MoltenVK loaded directly) the extension does not exist and
+        // requesting it fails vkCreateInstance with VK_ERROR_EXTENSION_NOT_PRESENT - enable it only
+        // when it is enumerated.
+        {
+            uint32_t count = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+            std::vector<VkExtensionProperties> props(count);
+            vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data());
+            for (const VkExtensionProperties& e : props)
+                if (!std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+                {
+                    instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                    ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                    break;
+                }
+        }
         instanceExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-        ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
         ici.pApplicationInfo = &app;
         ici.enabledExtensionCount = uint32_t(instanceExtensions.size());

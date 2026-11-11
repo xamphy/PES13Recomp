@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D6">
-  <img alt="iPadOS arm64" src="https://img.shields.io/badge/iPadOS-arm64%20(in%20progress)-555555">
+  <img alt="iPadOS arm64" src="https://img.shields.io/badge/iPadOS-arm64%20(boots)-555555">
   <img alt="Vulkan" src="https://img.shields.io/badge/renderer-Vulkan-AC162C">
   <img alt="Metal via MoltenVK" src="https://img.shields.io/badge/iPad-Metal%20via%20MoltenVK-999999">
   <img alt="Built with XenonRecomp" src="https://img.shields.io/badge/built%20with-XenonRecomp-6F42C1">
@@ -28,7 +28,8 @@
 
 > [!WARNING]
 > **Work in progress.** It is playable on Windows (menus, training, exhibition matches, sound,
-> saves), but expect bugs. The iPad version builds but has not yet run on a device.
+> saves), but expect bugs. On iPad the game now launches and reaches the title screen; performance
+> has not been tested yet.
 
 ## Contents
 
@@ -64,7 +65,7 @@
 | Boots on Windows | ✅ Done |
 | Graphics | ✅ Menus, training, matches and cutscenes render correctly |
 | Menus, input, matches | ✅ Windows: training, exhibition matches, sound, saves (60 fps; set pieces and goal kicks locked to 30 fps by the game) |
-| iPad | 🚧 The app builds; not yet run on a device |
+| iPad | 🚧 Launches on an M2 iPad Air: picture, sound and the title screen work. Performance not tested yet. |
 | Polish | 📋 Planned: anisotropic filtering, FXAA, resolution scaling, touch controls ([docs/improvements.md](docs/improvements.md)) |
 
 Open bugs are tracked in [docs/listofbugs.md](docs/listofbugs.md).
@@ -120,6 +121,11 @@ Installing it from a Windows PC with AltStore, and copying the game files, is de
 
 The app asks for the `extended-virtual-addressing` and `increased-memory-limit` entitlements. The
 Xbox 360 address space is 4 GB, and a match uses about 1 GB.
+
+**First device test** (M2 iPad Air, installed with Sideloadly and a free Apple ID): the app launches,
+the 4 GB reservation succeeds, and the game renders and plays sound up to the title screen.
+Performance has not been measured yet. For now you need a Bluetooth controller; on-screen touch
+controls are being worked on.
 
 ## Controls
 
