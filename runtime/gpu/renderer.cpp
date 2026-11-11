@@ -89,13 +89,7 @@ namespace
     // GPU timestamps: each mark closes an interval since the previous mark and attributes it
     // to a category (0 draw, 1 resolve, 2 texture upload, 3 other: barriers, pass changes, gaps).
     VkQueryPool g_tsPool = VK_NULL_HANDLE;
-#ifdef __APPLE__
-    // Metal counter sample buffers hold at most 32 KB (4096 timestamps); a bigger pool makes
-    // MoltenVK fall back to emulated timestamps that always read 0.
-    constexpr uint32_t kMaxTimestamps = 4096;
-#else
     constexpr uint32_t kMaxTimestamps = 16384;
-#endif
     constexpr uint32_t kFramesInFlight = 2;
     uint32_t g_tsCount = 0;
     uint8_t* g_tsCategory = nullptr; // the current frame slot's array

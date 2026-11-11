@@ -130,11 +130,8 @@ succeeds and the game is playable - menus, exhibition matches and sound work.
   drop to 10-25 fps: the GPU command processor (CPU side) needs 35-60 ms per frame there. The
   iPad also throttles once its thermal state reaches "serious" (shown in the overlay). This is
   the current focus.
-- **Performance work in testing:** the game's main thread and the command processor now ask iPadOS
-  for performance cores (thread QoS), MoltenVK encodes Metal command buffers on its own thread
-  (asynchronous queue submits), and GPU timestamps work on Apple (the query pool was too big for
-  Metal), so the logs can now split CPU and GPU time. Thermal state and Low Power Mode changes are
-  logged.
+- **Performance work in testing** happens on the `ipad-perf` branch; `main` keeps the best-performing
+  build tested on the iPad so far. Thermal state and Low Power Mode changes are logged.
 - **Fixed:** files with capitals in their names (e.g. the main menu background movies) were not
   found on the iPad, whose file system is case-sensitive. Paths now match ignoring case.
 - **Touch controls:** a floating left stick, D-pad, A/B/X/Y, shoulders, triggers, Back/Start and

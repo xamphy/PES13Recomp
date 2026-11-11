@@ -3,7 +3,6 @@
 #include <guest_memory.h>
 #include <kernel/thread.h>
 #include <kernel/interrupts.h>
-#include <kernel/host_qos.h>
 #include <debug/kick_trace.h>
 #include <debug/experiments.h>
 #include "xenos.h"
@@ -745,7 +744,6 @@ namespace
     void CommandProcessorThread()
     {
         g_cpThreadId = std::this_thread::get_id();
-        Kernel::SetHostThreadQos(Kernel::HostQos::Interactive); // Apple: keep it on a performance core
 #ifdef _WIN32
         std::printf("[gpu] command processor: host thread %lu\n", GetCurrentThreadId());
 #endif
