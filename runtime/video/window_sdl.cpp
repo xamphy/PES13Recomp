@@ -157,19 +157,18 @@ namespace Video::Window
 #else
             const char* vulkanLib = nullptr;
 #endif
-#if TARGET_OS_IOS
-            // MoltenVK encodes Metal command buffers inside vkQueueSubmit by default, on the
-            // command-processor thread (~4 ms per frame in matches). Asynchronous submits move
-            // that work to MoltenVK's own queue thread. Must be set before MoltenVK loads.
-            setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
-#endif
             if (!SDL_Vulkan_LoadLibrary(vulkanLib))
             {
                 std::fprintf(stderr, "[video] SDL_Vulkan_LoadLibrary: %s\n", SDL_GetError());
                 return;
             }
-            g_window = SDL_CreateWindow(title, int(width), int(height),
-                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); // full-resolution drawable on Retina / iPad, not points
+            SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY; // full-resolution drawable on Retina / iPad, not points
+#if TARGET_OS_IOS
+            // SDL's view controller hides the status bar (clock, battery) only for borderless or
+            // fullscreen windows; the window already covers the whole screen on iPad.
+            flags |= SDL_WINDOW_BORDERLESS;
+#endif
+            g_window = SDL_CreateWindow(title, int(width), int(height), flags);
             if (!g_window)
             {
                 std::fprintf(stderr, "[video] SDL_CreateWindow: %s\n", SDL_GetError());
