@@ -1,9 +1,9 @@
 # Running PES 2013 on the iPad (from a Windows PC, no Mac)
 
-Status (2026-11-11): first run on a device (M2 iPad Air, installed with Sideloadly and a free Apple ID).
-The app **launches**, renders and plays sound up to the title screen. Performance has **not been
-tested** yet, and there are no touch controls yet: pair a Bluetooth controller first. If something
-goes wrong, the logs below are how we find it.
+Status (2026-11-11): **playable** on an M2 iPad Air (installed with Sideloadly and a free Apple ID).
+Menus, exhibition matches and sound work; on-screen touch controls appear when no controller is
+connected. Matches run at about 40-45 fps; set pieces, cutscenes and the Game Plan screen drop to
+10-25 fps for now. If something goes wrong, the logs below are how we find it.
 
 ## 1. Get the .ipa
 
@@ -58,5 +58,9 @@ game files are missing).
 
 ## Known gaps
 
-No touch controls; first launch is slow (shaders are translated on first use and cached in
-`userdata`); performance on the M2 is unknown.
+- Set pieces, cutscenes and the Game Plan screen drop to 10-25 fps (matches: 40-45 fps).
+- The iPad throttles when it gets hot: the overlay under the picture shows the thermal state.
+  Playing while charging makes it heat up sooner.
+- The first launch is slow: shaders are translated on first use and cached in `userdata`.
+- If the main menu background movie does not play, check that `game/files` has all 39 files
+  (`pes_topBG_E_1.sfd` and `pes_topBG_E_2.sfd` included).

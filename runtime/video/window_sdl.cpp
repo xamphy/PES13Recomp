@@ -8,6 +8,8 @@
 #include "window.h"
 #include "presenter.h"
 #include "prompt_apple.h"
+#include "touch_controls_ios.h"
+#include "perf_overlay_ios.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -68,6 +70,13 @@ namespace
         s.state = p;
     }
 
+    bool AnyPadConnected()
+    {
+        for (const PadSlot& s : g_pads)
+            if (s.pad) return true;
+        return false;
+    }
+
     void HandleGamepadEvent(const SDL_Event& e)
     {
         switch (e.type)
@@ -104,6 +113,11 @@ namespace
         default:
             break;
         }
+#if TARGET_OS_IOS
+        // The on-screen controls step aside while a real controller is connected.
+        if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED)
+            Video::Apple::SetTouchControlsVisible(!AnyPadConnected());
+#endif
     }
 
     template <typename F>
@@ -162,6 +176,14 @@ namespace Video::Window
                 std::printf("[video] window %dx%d points, %dx%d pixels\n", ww, wh, pw, ph);
             }
             g_focus = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+#if TARGET_OS_IOS
+            if (void* uiWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr))
+            {
+                Apple::InstallPerfOverlay(uiWindow); // first: it stays under the touch controls
+                Apple::InstallTouchControls(uiWindow);
+                Apple::SetTouchControlsVisible(!AnyPadConnected());
+            }
+#endif
             ok = true;
         });
         return ok;
@@ -181,6 +203,11 @@ namespace Video::Window
         {
             if (!SDL_Vulkan_CreateSurface(g_window, instance, nullptr, &surface))
                 std::fprintf(stderr, "[video] SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+#if TARGET_OS_IOS
+            // SDL just added its Metal view on top of everything: put the overlays back in front.
+            Apple::RaisePerfOverlay();
+            Apple::RaiseTouchControls();
+#endif
         });
         return surface;
     }
@@ -217,6 +244,9 @@ namespace Video
     HostPad GetHostKeyboard()
     {
         HostPad p;
+#if TARGET_OS_IOS
+        p = Apple::GetTouchPad(); // on-screen controls; keyboard keys below add to it
+#endif
         if (!g_focus) return p;
         int count = 0;
         const bool* k = SDL_GetKeyboardState(&count);
@@ -228,12 +258,16 @@ namespace Video
             { SDL_SCANCODE_Q, 0x0100 }, { SDL_SCANCODE_E, 0x0200 } };
         for (const auto& m : map)
             if (key(m.s)) p.buttons |= m.bit;
-        p.lx = int16_t((key(SDL_SCANCODE_D) ? 32767 : 0) - (key(SDL_SCANCODE_A) ? 32767 : 0));
-        p.ly = int16_t((key(SDL_SCANCODE_W) ? 32767 : 0) - (key(SDL_SCANCODE_S) ? 32767 : 0));
-        p.rx = int16_t((key(SDL_SCANCODE_L) ? 32767 : 0) - (key(SDL_SCANCODE_J) ? 32767 : 0));
-        p.ry = int16_t((key(SDL_SCANCODE_I) ? 32767 : 0) - (key(SDL_SCANCODE_K) ? 32767 : 0));
-        p.lt = key(SDL_SCANCODE_LSHIFT) || key(SDL_SCANCODE_RSHIFT) ? 255 : 0;
-        p.rt = key(SDL_SCANCODE_R) ? 255 : 0;
+        auto keyAxis = [&](int16_t& v, SDL_Scancode pos, SDL_Scancode neg)
+        {
+            if (key(pos) || key(neg)) v = int16_t((key(pos) ? 32767 : 0) - (key(neg) ? 32767 : 0));
+        };
+        keyAxis(p.lx, SDL_SCANCODE_D, SDL_SCANCODE_A);
+        keyAxis(p.ly, SDL_SCANCODE_W, SDL_SCANCODE_S);
+        keyAxis(p.rx, SDL_SCANCODE_L, SDL_SCANCODE_J);
+        keyAxis(p.ry, SDL_SCANCODE_I, SDL_SCANCODE_K);
+        if (key(SDL_SCANCODE_LSHIFT) || key(SDL_SCANCODE_RSHIFT)) p.lt = 255;
+        if (key(SDL_SCANCODE_R)) p.rt = 255;
         return p;
     }
 
@@ -261,6 +295,18 @@ namespace Video
         iosArgv.push_back(nullptr);
         argc = int(iosArgv.size()) - 1;
         argv = iosArgv.data();
+#endif
+#if TARGET_OS_IOS
+        // GPU work is not allowed in the background (Metal loses the device). These app events are
+        // delivered synchronously from UIKit, so they need an event watch, not the queue below.
+        SDL_AddEventWatch([](void*, SDL_Event* e) -> bool
+        {
+            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND)
+                SetAppInBackground(true);
+            else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND)
+                SetAppInBackground(false);
+            return true;
+        }, nullptr);
 #endif
         // The game: 64 MB host stack (the Windows main thread has 1 MB; recompiled code can nest deeply).
         static AppArgs args;

@@ -13,10 +13,13 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 namespace
@@ -407,11 +410,78 @@ namespace Video
 
     const VulkanContext* GetVulkanContext() { return g_device ? &g_context : nullptr; }
 
+    namespace
+    {
+        std::mutex g_perfMutex;
+        PerfStats g_perf;
+
+        std::shared_mutex g_submitLock;      // shared: a submit in flight; exclusive: going to background
+        std::mutex g_backgroundMutex;
+        std::condition_variable g_backgroundCv;
+        std::atomic<bool> g_background{ false };
+    }
+
+    void SetAppInBackground(bool background)
+    {
+        {
+            std::lock_guard lock(g_backgroundMutex);
+            g_background = background;
+        }
+        if (background)
+        {
+            // Wait for submits already past the check; new ones now wait in GpuSubmitScope.
+            g_submitLock.lock();
+            g_submitLock.unlock();
+            std::printf("[video] app in background - GPU work paused\n");
+        }
+        else
+        {
+            g_backgroundCv.notify_all();
+            std::printf("[video] app in foreground - GPU work resumed\n");
+        }
+    }
+
+    GpuSubmitScope::GpuSubmitScope()
+    {
+        for (;;)
+        {
+            g_submitLock.lock_shared();
+            if (!g_background.load())
+                return;
+            g_submitLock.unlock_shared();
+            std::unique_lock lock(g_backgroundMutex);
+            g_backgroundCv.wait(lock, [] { return !g_background.load(); });
+        }
+    }
+
+    GpuSubmitScope::~GpuSubmitScope() { g_submitLock.unlock_shared(); }
+
+    void SetPerfStats(const PerfStats& stats)
+    {
+        std::lock_guard lock(g_perfMutex);
+        const uint32_t w = g_perf.frameWidth, h = g_perf.frameHeight;
+        g_perf = stats;
+        g_perf.frameWidth = w;
+        g_perf.frameHeight = h;
+    }
+
+    PerfStats GetPerfStats()
+    {
+        std::lock_guard lock(g_perfMutex);
+        return g_perf;
+    }
+
     void PresentImage(VkImage image, uint32_t width, uint32_t height)
     {
         std::lock_guard lock(g_presentMutex);
+        GpuSubmitScope gpuAllowed; // iPadOS: no GPU work while the app is in the background
         if (!g_device || !image || width == 0 || height == 0)
             return;
+        {
+            std::lock_guard perfLock(g_perfMutex);
+            g_perf.frameWidth = width;
+            g_perf.frameHeight = height;
+        }
         if (!g_swapchain)
         {
             vkDeviceWaitIdle(g_device);
@@ -468,6 +538,7 @@ namespace Video
     void Present(const uint32_t* rgba, uint32_t width, uint32_t height)
     {
         std::lock_guard lock(g_presentMutex);
+        GpuSubmitScope gpuAllowed; // iPadOS: no GPU work while the app is in the background
         if (!g_device || width == 0 || height == 0)
             return;
 

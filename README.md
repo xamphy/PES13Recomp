@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D6">
-  <img alt="iPadOS arm64" src="https://img.shields.io/badge/iPadOS-arm64%20(boots)-555555">
+  <img alt="iPadOS arm64" src="https://img.shields.io/badge/iPadOS-arm64%20(playable)-555555">
   <img alt="Vulkan" src="https://img.shields.io/badge/renderer-Vulkan-AC162C">
   <img alt="Metal via MoltenVK" src="https://img.shields.io/badge/iPad-Metal%20via%20MoltenVK-999999">
   <img alt="Built with XenonRecomp" src="https://img.shields.io/badge/built%20with-XenonRecomp-6F42C1">
@@ -28,8 +28,8 @@
 
 > [!WARNING]
 > **Work in progress.** It is playable on Windows (menus, training, exhibition matches, sound,
-> saves), but expect bugs. On iPad the game now launches and reaches the title screen; performance
-> has not been tested yet.
+> saves), but expect bugs. On iPad (M2) matches are playable at 40-45 fps with touch controls or a
+> controller; set pieces, cutscenes and the Game Plan screen still drop to 10-25 fps.
 
 ## Contents
 
@@ -55,7 +55,8 @@
 | **Aspect ratio** | Keeps the game's 16:9 picture on any window or screen shape (letterbox / pillarbox) |
 | **Sound** | XAudio implemented on miniaudio |
 | **Saves and profiles** | Profiles, save data, notifications and the Xbox on-screen keyboard (player names) work |
-| **Controllers** | Xbox, PlayStation and MFi controllers via SDL / XInput, plus a keyboard |
+| **Controllers** | Xbox, PlayStation and MFi controllers via SDL / XInput, plus a keyboard; on-screen touch controls on iPad |
+| **Performance overlay** | On iPad, live FPS, frame time, memory, thermal state and battery in the letterbox bar below the picture |
 
 ## Status
 
@@ -65,8 +66,8 @@
 | Boots on Windows | ✅ Done |
 | Graphics | ✅ Menus, training, matches and cutscenes render correctly |
 | Menus, input, matches | ✅ Windows: training, exhibition matches, sound, saves (60 fps; set pieces and goal kicks locked to 30 fps by the game) |
-| iPad | 🚧 Launches on an M2 iPad Air: picture, sound and the title screen work. Performance not tested yet. |
-| Polish | 📋 Planned: anisotropic filtering, FXAA, resolution scaling, touch controls ([docs/improvements.md](docs/improvements.md)) |
+| iPad | 🚧 Playable on an M2 iPad Air: menus, matches, sound, touch controls. Matches run at 40-45 fps; set pieces, cutscenes and the Game Plan screen drop to 10-25 fps (performance work in progress) |
+| Polish | 📋 Planned: anisotropic filtering, FXAA, resolution scaling ([docs/improvements.md](docs/improvements.md)) |
 
 Open bugs are tracked in [docs/listofbugs.md](docs/listofbugs.md).
 
@@ -122,14 +123,24 @@ Installing it from a Windows PC with AltStore, and copying the game files, is de
 The app asks for the `extended-virtual-addressing` and `increased-memory-limit` entitlements. The
 Xbox 360 address space is 4 GB, and a match uses about 1 GB.
 
-**First device test** (M2 iPad Air, installed with Sideloadly and a free Apple ID): the app launches,
-the 4 GB reservation succeeds, and the game renders and plays sound up to the title screen.
-Performance has not been measured yet. For now you need a Bluetooth controller; on-screen touch
-controls are being worked on.
+**On the device** (M2 iPad Air, installed with Sideloadly and a free Apple ID): the 4 GB reservation
+succeeds and the game is playable - menus, exhibition matches and sound work.
+
+- **Performance:** matches run at about 40-45 fps. Set pieces, cutscenes and the Game Plan screen
+  drop to 10-25 fps: the GPU command processor (CPU side) needs 35-60 ms per frame there. The
+  iPad also throttles once its thermal state reaches "serious" (shown in the overlay). This is
+  the current focus.
+- **Touch controls:** a floating left stick, D-pad, A/B/X/Y, shoulders, triggers, Back/Start and
+  stick clicks drawn over the picture. They hide while a Bluetooth controller is connected.
+- **Performance overlay:** FPS, command-processor time per frame, memory, thermal state and battery,
+  in the black bar under the 16:9 picture.
+- Switching to another app pauses GPU work (iPadOS does not allow it in the background) and the
+  game resumes when you come back.
 
 ## Controls
 
-A controller is recommended. Keyboard controls (player 1, Windows):
+A controller is recommended. On iPad, on-screen touch controls appear when no controller is
+connected. Keyboard controls (player 1, Windows and Mac):
 
 | Xbox 360 | Keyboard | | Xbox 360 | Keyboard |
 |---|---|---|---|---|

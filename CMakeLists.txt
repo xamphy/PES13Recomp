@@ -93,6 +93,11 @@ else()
     # Native text prompt (UIKit / AppKit): Objective-C++ with ARC, built by the C++ compiler.
     set_source_files_properties(runtime/video/prompt_apple.mm PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc")
     if (IOS)
+        # On-screen touch controls (UIKit overlay over the game view).
+        # Performance overlay in the letterbox bar (UIKit, under the touch controls).
+        target_sources(pes13 PRIVATE runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm)
+        set_source_files_properties(runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm
+            PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc")
         target_link_libraries(pes13 PRIVATE "-framework UIKit")
     else()
         target_link_libraries(pes13 PRIVATE "-framework AppKit")

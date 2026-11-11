@@ -822,6 +822,18 @@ namespace
                 if (g_busyFrames)
                     std::printf("[gpu] CP busy per frame: avg %.1f ms, max %.1f ms, %llu of %llu frames over 16.7 ms\n",
                         g_busySumUs / 1000.0 / g_busyFrames, g_busyMaxUs / 1000.0, (unsigned long long)g_busyOver, (unsigned long long)g_busyFrames);
+                {
+                    static uint64_t perfLastDraws = 0;
+                    const uint64_t perfDraws = g_draws.load();
+                    Video::PerfStats ps;
+                    ps.fps = uint32_t(frames - lastFrames);
+                    ps.drawsPerFrame = uint32_t(frames > lastFrames ? (perfDraws - perfLastDraws) / (frames - lastFrames) : 0);
+                    ps.cpAvgMs = g_busyFrames ? float(g_busySumUs / 1000.0 / g_busyFrames) : 0.0f;
+                    ps.cpMaxMs = float(g_busyMaxUs / 1000.0);
+                    ps.slowFrames = uint32_t(g_busyOver);
+                    Video::SetPerfStats(ps);
+                    perfLastDraws = perfDraws;
+                }
                 g_busySumUs = g_busyMaxUs = g_busyFrames = g_busyOver = 0;
                 std::printf("[gpu] WAIT_REG_MEM: %llu waits, %llu ms total, max %llu ms\n",
                     (unsigned long long)g_waitCount.exchange(0), (unsigned long long)(g_waitUs.exchange(0) / 1000),

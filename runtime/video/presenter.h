@@ -21,6 +21,32 @@ namespace Video
 
     void SetTitle(const std::string& title);
 
+    // Performance numbers for the on-screen overlay (iPadOS: drawn in the letterbox bar).
+    // The GPU thread publishes them once per second; any thread may read them.
+    struct PerfStats
+    {
+        uint32_t fps = 0;            // guest frames swapped in the last second
+        uint32_t drawsPerFrame = 0;
+        float cpAvgMs = 0, cpMaxMs = 0; // command-processor busy time per frame
+        uint32_t slowFrames = 0;     // frames whose CP time exceeded 16.7 ms
+        uint32_t frameWidth = 0, frameHeight = 0; // the game's output size (set by the presenter)
+    };
+    // iPadOS forbids GPU work while the app is in the background (Metal fails the command buffer
+    // and the device is lost for good). Every queue submit / acquire / present runs inside a
+    // GpuSubmitScope: it waits while the app is in the background. SetAppInBackground(true) returns
+    // only after submits already in flight have finished. Elsewhere it never blocks.
+    void SetAppInBackground(bool background);
+    struct GpuSubmitScope
+    {
+        GpuSubmitScope();
+        ~GpuSubmitScope();
+        GpuSubmitScope(const GpuSubmitScope&) = delete;
+        GpuSubmitScope& operator=(const GpuSubmitScope&) = delete;
+    };
+
+    void SetPerfStats(const PerfStats& stats); // keeps frameWidth/Height
+    PerfStats GetPerfStats();
+
     // True while the game window is the foreground window (keyboard input goes to the game).
     bool WindowHasFocus();
 

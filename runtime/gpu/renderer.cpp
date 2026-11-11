@@ -10,6 +10,7 @@
 
 #include <guest_memory.h>
 #include <video/vulkan_context.h>
+#include <video/presenter.h>
 #include <kernel/kernel.h>
 #include <kernel/objects.h>
 #include <kernel/thread.h>
@@ -646,6 +647,7 @@ namespace
         const auto tSubmit0 = std::chrono::steady_clock::now();
         g_time.endRecord += us(tEnd0, tSubmit0);
         FrameSlot& slot = g_slots[g_slot];
+        Video::GpuSubmitScope gpuAllowed; // iPadOS: waits while the app is in the background
         if (vkQueueSubmit(g_vk->queue, 1, &si, g_fence) == VK_SUCCESS)
         {
             g_time.submit += us(tSubmit0, std::chrono::steady_clock::now());
