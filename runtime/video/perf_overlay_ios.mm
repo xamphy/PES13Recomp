@@ -127,6 +127,19 @@ static const char* ThermalName(NSProcessInfoThermalState t)
     [s addAttribute:NSForegroundColorAttributeName value:fpsColor range:NSMakeRange(0, fps.length)];
     _line1.attributedText = s;
 
+    // Log thermal state / Low Power Mode changes (and the frame rate at that moment), so slow
+    // stretches in pes13.log can be matched against throttling.
+    NSProcessInfo* info = NSProcessInfo.processInfo;
+    static int lastThermal = -1, lastLowPower = -1;
+    const int thermal = int(info.thermalState), lowPower = info.isLowPowerModeEnabled ? 1 : 0;
+    if (thermal != lastThermal || lowPower != lastLowPower)
+    {
+        std::printf("[perf] thermal %s, low power mode %s (%u fps, CP %.1f ms)\n",
+            ThermalName(info.thermalState), lowPower ? "ON" : "off", p.fps, p.cpAvgMs);
+        lastThermal = thermal;
+        lastLowPower = lowPower;
+    }
+
     UIDevice* dev = UIDevice.currentDevice;
     NSString* battery = @"";
     if (dev.batteryLevel >= 0)
@@ -134,8 +147,8 @@ static const char* ThermalName(NSProcessInfoThermalState t)
         const bool charging = dev.batteryState == UIDeviceBatteryStateCharging || dev.batteryState == UIDeviceBatteryStateFull;
         battery = [NSString stringWithFormat:@"  ·  battery %d%%%@", int(dev.batteryLevel * 100 + 0.5), charging ? @" (charging)" : @""];
     }
-    _line2.text = [NSString stringWithFormat:@"RAM %.2f GB  ·  thermal %s%@  ·  %ux%u",
-        FootprintGB(), ThermalName(NSProcessInfo.processInfo.thermalState), battery, p.frameWidth, p.frameHeight];
+    _line2.text = [NSString stringWithFormat:@"RAM %.2f GB  ·  thermal %s%@%@  ·  %ux%u",
+        FootprintGB(), ThermalName(info.thermalState), lowPower ? @"  ·  LOW POWER" : @"", battery, p.frameWidth, p.frameHeight];
     [self setNeedsLayout]; // the game's output size can change
 }
 @end

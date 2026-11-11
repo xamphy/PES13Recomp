@@ -59,8 +59,9 @@ game files are missing).
 ## Known gaps
 
 - Set pieces, cutscenes and the Game Plan screen drop to 10-25 fps (matches: 40-45 fps).
-- The iPad throttles when it gets hot: the overlay under the picture shows the thermal state.
+- The iPad throttles when it gets hot: the overlay under the picture shows the thermal state (and
+  LOW POWER when Low Power Mode is on); changes are logged as `[perf]` lines in `pes13.log`.
   Playing while charging makes it heat up sooner.
 - The first launch is slow: shaders are translated on first use and cached in `userdata`.
-- If the main menu background movie does not play, check that `game/files` has all 39 files
-  (`pes_topBG_E_1.sfd` and `pes_topBG_E_2.sfd` included).
+- Fixed: the main menu background movie did not play (file names with capitals were not found
+  on the case-sensitive iPad file system).

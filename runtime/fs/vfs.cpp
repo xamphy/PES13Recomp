@@ -25,6 +25,30 @@ namespace
         return p;
     }
 
+    // Appends one (lowercased) guest path component to a host path. Guest paths are matched
+    // case-insensitively (Normalize lowercases them), which Windows does for free; on Apple /
+    // Linux file systems that are case-sensitive (iPadOS), look up the real spelling in the
+    // directory - e.g. the menu movies "pes_topBG_E_1.sfd" were "not found" on the iPad.
+    // A component that does not exist yet (a file being created) keeps the guest spelling.
+    std::filesystem::path AppendComponent(const std::filesystem::path& dir, const std::string& part)
+    {
+        std::filesystem::path direct = dir / part;
+#ifndef _WIN32
+        std::error_code ec;
+        if (std::filesystem::exists(direct, ec))
+            return direct;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        {
+            const std::string name = it->path().filename().string();
+            if (name.size() == part.size() &&
+                std::equal(name.begin(), name.end(), part.begin(),
+                    [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); }))
+                return it->path();
+        }
+#endif
+        return direct;
+    }
+
     // Longest entry in `map` that is a prefix of `path` at a path-component boundary.
     template<typename M>
     typename M::const_iterator LongestPrefix(const M& map, const std::string& path)
@@ -118,7 +142,7 @@ namespace Fs
             const size_t end = rest.find('\\', start);
             const std::string part = rest.substr(start, end == std::string::npos ? std::string::npos : end - start);
             if (!part.empty() && part != ".")
-                host /= part;
+                host = AppendComponent(host, part);
             if (end == std::string::npos) break;
             start = end + 1;
         }
