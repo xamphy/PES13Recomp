@@ -1,0 +1,17 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Pro Evolution Soccer 2013",
+  "system": "Xbox 360",
+  "type": "recomp",
+  "project": "PES13Recomp",
+  "original": { "region": "Europe" },
+  "status": "playable",
+  "targets": ["Windows", "iOS"],
+  "toolchain": "XenonRecomp",
+  "approach": "XenonRecomp static recompilation with a Vulkan renderer at the GPU command-processor level (EDRAM tile model, Xenos shaders to SPIR-V); MoltenVK on iPad",
+  "started": "2026-11-04",
+  "notes": "Playable on Windows at 60 fps (menus, training, exhibition matches, sound, saves). Playable on an M2 iPad (iPadOS, sideloaded) with touch controls or a Bluetooth controller: matches at 40-45 fps, set pieces and cutscenes slower for now. No game files are included; build it from your own disc.",
+  "tags": ["football", "ipad", "vulkan", "moltenvk"],
+  "maintainers": [{ "name": "xamphy", "link": "https://github.com/xamphy" }],
+  "links": [{ "label": "iPad guide", "url": "https://github.com/xamphy/PES13Recomp/blob/main/docs/IPAD.md" }]
+}
