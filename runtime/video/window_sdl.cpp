@@ -162,8 +162,13 @@ namespace Video::Window
                 std::fprintf(stderr, "[video] SDL_Vulkan_LoadLibrary: %s\n", SDL_GetError());
                 return;
             }
-            g_window = SDL_CreateWindow(title, int(width), int(height),
-                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); // full-resolution drawable on Retina / iPad, not points
+            SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY; // full-resolution drawable on Retina / iPad, not points
+#if TARGET_OS_IOS
+            // SDL's view controller hides the status bar (clock, battery) only for borderless or
+            // fullscreen windows; the window already covers the whole screen on iPad.
+            flags |= SDL_WINDOW_BORDERLESS;
+#endif
+            g_window = SDL_CreateWindow(title, int(width), int(height), flags);
             if (!g_window)
             {
                 std::fprintf(stderr, "[video] SDL_CreateWindow: %s\n", SDL_GetError());

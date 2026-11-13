@@ -126,12 +126,17 @@ Xbox 360 address space is 4 GB, and a match uses about 1 GB.
 **On the device** (M2 iPad Air, installed with Sideloadly and a free Apple ID): the 4 GB reservation
 succeeds and the game is playable - menus, exhibition matches and sound work.
 
-- **Performance:** matches run at about 40-45 fps. Set pieces, cutscenes and the Game Plan screen
-  drop to 10-25 fps: the GPU command processor (CPU side) needs 35-60 ms per frame there. The
-  iPad also throttles once its thermal state reaches "serious" (shown in the overlay). This is
-  the current focus.
-- **Performance work in testing** happens on the `ipad-perf` branch; `main` keeps the best-performing
-  build tested on the iPad so far. Thermal state and Low Power Mode changes are logged.
+- **Performance (build #17):** matches run at 50-60 fps. Replays, goal celebrations and cutscenes
+  drop to 13-25 fps: they are GPU-bound (33-65 ms of GPU time per frame, ~48 render passes, most of
+  them a single post-processing draw). Free Training runs at 30 fps. The iPad also throttles once its
+  thermal state reaches "serious" (shown in the overlay). Reducing render passes is the current focus.
+- **Performance work done:** the game's main thread and the command processor ask iPadOS for
+  performance cores (thread QoS). Per-draw GPU timestamps are off on Apple: Metal samples counters only
+  between passes, so each one split a render pass and made matches drop to ~25 fps; only the frame
+  start / end are timed now. Asynchronous MoltenVK submits were tried and reverted. A `[passes]` log
+  line shows why render passes end and how much they load and store. The status bar is hidden.
+  Thermal state and Low Power Mode changes are logged. Untested performance work goes to the
+  `ipad-perf` branch first; `main` keeps the best build tested on the iPad.
 - **Fixed:** files with capitals in their names (e.g. the main menu background movies) were not
   found on the iPad, whose file system is case-sensitive. Paths now match ignoring case.
 - **Touch controls:** a floating left stick, D-pad, A/B/X/Y, shoulders, triggers, Back/Start and

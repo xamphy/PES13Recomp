@@ -95,7 +95,28 @@ namespace
     uint8_t* g_tsCategory = nullptr; // the current frame slot's array
     double g_gpuMs[4] = {};
     uint32_t g_passBegins = 0, g_barriers = 0;
-    void MarkGpu(uint8_t category);
+
+    // Render pass statistics (printed every 120 frames): why passes end, how many draws they
+    // hold, and how much of the attachment they touch versus what they load + store. On a
+    // tile-based GPU (iPad) every pass loads and stores its whole framebuffer.
+    // g_passEndContext names the operation that is ending the pass (set by PassEndContext).
+    const char* g_passEndContext = nullptr;
+    struct PassEndContext
+    {
+        const char* saved;
+        explicit PassEndContext(const char* what) : saved(g_passEndContext) { g_passEndContext = what; }
+        ~PassEndContext() { g_passEndContext = saved; }
+    };
+    struct PassStats
+    {
+        std::map<std::string, uint32_t> endReasons;
+        uint32_t byDraws[4] = {}; // 0, 1, 2-4, 5+ draws
+        uint64_t framebufferPixels = 0, touchedPixels = 0, draws = 0;
+    } g_passStats;
+    uint32_t g_passDraws = 0;
+    int32_t g_passX0 = 0, g_passY0 = 0, g_passX1 = 0, g_passY1 = 0; // union of the draws' scissors
+    VkExtent2D g_passExtent{};
+    void MarkGpu(uint8_t category, bool frameBoundary = false);
 
     struct ScopedTimer
     {
@@ -442,12 +463,12 @@ namespace
         }
     }
 
-    void EndPass();
+    void EndPass(const char* why = "other");
 
     void Transition(Image& img, VkImageLayout to)
     {
         if (img.layout == to) return;
-        EndPass();
+        EndPass("layout change");
         VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         b.oldLayout = img.layout;
         b.newLayout = to;
@@ -573,7 +594,7 @@ namespace
         g_recording = true;
         vkCmdResetQueryPool(g_cmd, g_tsPool, 0, kMaxTimestamps);
         g_tsCount = 0;
-        MarkGpu(3);
+        MarkGpu(3, true);
     }
 
     // Submits the frame. With wait, also waits for the GPU to finish everything (readbacks);
@@ -583,8 +604,8 @@ namespace
         if (!g_recording) return;
         ++g_time.frames;
         const auto tEnd0 = std::chrono::steady_clock::now();
-        EndPass();
-        MarkGpu(3);
+        EndPass("frame end");
+        MarkGpu(3, true);
         vkEndCommandBuffer(g_cmd);
         g_uploadsPeak = std::max(g_uploadsPeak, g_uploads.offset);
         g_uniformsPeak = std::max(g_uniformsPeak, g_uniforms.offset);
@@ -660,9 +681,18 @@ namespace
         if (wait) WaitForGpu();
     }
 
-    void MarkGpu(uint8_t category)
+    void MarkGpu(uint8_t category, bool frameBoundary)
     {
         if (!g_recording || g_tsCount >= kMaxTimestamps) return;
+#ifdef __APPLE__
+        // Apple GPUs sample counters only at encoder boundaries: MoltenVK ends the current Metal
+        // render encoder for every timestamp, so per-draw marks split render passes (costly on
+        // the tile-based GPU; the iPad got slower when timestamps started working). Keep only
+        // the frame start / end marks: total GPU time per frame (the "GPU busy" figure).
+        if (!frameBoundary) return;
+#else
+        (void)frameBoundary;
+#endif
         g_tsCategory[g_tsCount] = category;
         vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsPool, g_tsCount++);
     }
@@ -786,6 +816,7 @@ namespace
     // Whole image to the target's initial value (color 0, depth 1 / stencil 0); leaves it in TRANSFER_DST.
     void ClearRenderTarget(Image& img, bool isDepth)
     {
+        PassEndContext passEndContext("clear");
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         const VkImageSubresourceRange range{ img.aspect, 0, 1, 0, 1 };
         if (isDepth)
@@ -891,7 +922,7 @@ namespace
         uint32_t height = std::max(rows, rt->img.height + rt->img.height / 2);
         height = std::min(rt->fullHeight, (height + rt->tileH - 1) / rt->tileH * rt->tileH);
 
-        EndPass();
+        EndPass("target grows");
         Image grown;
         if (!CreateImage(grown, rt->format, rt->img.width, height, rt->usage, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D))
         {
@@ -1016,6 +1047,7 @@ namespace
     // tiles: (src x, src y, dst x, dst y) in pixels, tileW x tileH each.
     void DepthToColor(RenderTarget* from, RenderTarget* to, const std::vector<uint32_t>& tiles, uint32_t tileW, uint32_t tileH)
     {
+        PassEndContext passEndContext("depth to color");
         if (tiles.empty() || !InitDepthToColor()) return;
         VkDeviceSize offset = 0;
         uint8_t* p = g_uploads.Allocate(tiles.size() * 4, 256, offset);
@@ -1153,6 +1185,7 @@ namespace
     uint64_t g_tilesSkipped = 0;
     void AcquireTiles(RenderTarget* rt, int32_t x, int32_t y, uint32_t w, uint32_t h, const VkRect2D* noCopy = nullptr)
     {
+        PassEndContext passEndContext("EDRAM tile transfer");
         if (!rt || !w || !h || x < 0 || y < 0) return;
         rt->maxRow = std::max(rt->maxRow, uint32_t(y) + h);
         const uint32_t c0 = uint32_t(x) / rt->tileW, r0 = uint32_t(y) / rt->tileH;
@@ -1274,9 +1307,17 @@ namespace
         }
     }
 
-    void EndPass()
+    void EndPass(const char* why)
     {
         if (!g_inPass) return;
+        PassStats& s = g_passStats;
+        ++s.endReasons[g_passEndContext ? g_passEndContext : why];
+        ++s.byDraws[g_passDraws == 0 ? 0 : g_passDraws == 1 ? 1 : g_passDraws <= 4 ? 2 : 3];
+        s.draws += g_passDraws;
+        s.framebufferPixels += uint64_t(g_passExtent.width) * g_passExtent.height;
+        if (g_passDraws && g_passX1 > g_passX0 && g_passY1 > g_passY0)
+            s.touchedPixels += uint64_t(std::min<int32_t>(g_passX1, int32_t(g_passExtent.width)) - g_passX0) *
+                uint64_t(std::min<int32_t>(g_passY1, int32_t(g_passExtent.height)) - g_passY0);
         vkCmdEndRenderPass(g_cmd);
         g_inPass = false;
         g_passColor = g_passDepth = nullptr;
@@ -1294,7 +1335,7 @@ namespace
     void BeginPass(RenderTarget* color, RenderTarget* depth)
     {
         if (g_inPass && g_passColor == color && g_passDepth == depth) return;
-        EndPass();
+        EndPass("target change");
         if (color) Transition(color->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (depth) Transition(depth->img, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         const VkRenderPass pass = RenderPassFor(color ? color->format : VK_FORMAT_UNDEFINED, depth ? depth->format : VK_FORMAT_UNDEFINED);
@@ -1324,6 +1365,10 @@ namespace
         g_passColor = color;
         g_passDepth = depth;
         ++g_passBegins;
+        g_passDraws = 0;
+        g_passExtent = extent;
+        g_passX0 = g_passY0 = INT32_MAX;
+        g_passX1 = g_passY1 = 0;
     }
     // ------------------------------------------------------------------ resolved surfaces
     // A resolve destination: guest texture memory [base, base + size), kept on the GPU.
@@ -1660,6 +1705,7 @@ namespace
     // Uploads the base level of a 2D texture from guest memory (records the copy).
     Texture* GetTexture(const xenos::xe_gpu_texture_fetch_t& fetch, const HostFormat& host)
     {
+        PassEndContext passEndContext("texture upload");
         const uint32_t width = fetch.size_2d.width + 1, height = fetch.size_2d.height + 1;
         const uint32_t base = fetch.base_address << 12;
         std::vector<uint32_t> key = { base, uint32_t(fetch.format), width, height, fetch.tiled, fetch.pitch, uint32_t(fetch.endianness) };
@@ -2005,7 +2051,7 @@ namespace
             }
         }
 
-        EndPass();
+        EndPass("composed texture");
         ClearImage(ct->img, VkClearColorValue{});
         VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -2071,6 +2117,7 @@ namespace
     // texture uploaded from guest memory, or a null image.
     VkImageView TextureView(uint32_t fetchIndex, xenos::FetchOpDimension dimension)
     {
+        PassEndContext passEndContext("texture sampled (RT/surface)");
         const auto fetch = g_regs.GetTextureFetch(fetchIndex);
         Image* nullImage = dimension == xenos::FetchOpDimension::k3DOrStacked ? &g_null3D
             : dimension == xenos::FetchOpDimension::kCube ? &g_nullCube : &g_null2D;
@@ -2832,6 +2879,7 @@ namespace
 
     void ResolveDepth(const draw_util::ResolveInfo& info)
     {
+        PassEndContext passEndContext("resolve depth");
     // PES_AB_AT=<seconds>: frame A normal, the next frame B with depth textures zeroed -> userdata/shots/ab_A.ppm, ab_B.ppm.
         static const bool skip = std::getenv("PES_DEBUG_NO_DEPTH_COPY") != nullptr; // A/B comparisons
         if (skip) return;
@@ -2921,6 +2969,7 @@ namespace
     uint64_t g_writeBacks = 0;
     void WriteBackSurface(Surface* s, xenos::Endian128 endian, bool fromLargeSource = false)
     {
+        PassEndContext passEndContext("write-back to guest memory");
         const uint32_t w = s->img.width, h = s->img.height;
         static Buffer rb;
         static VkDeviceSize rbSize = 0;
@@ -2987,6 +3036,7 @@ namespace
 
     void Resolve()
     {
+        PassEndContext passEndContext("resolve");
         ScopedTimer resolveTimer{ g_time.resolve };
         draw_util::ResolveInfo info;
         if (!draw_util::GetResolveInfo(g_regs, g_xeMemory, g_trace, 1, 1, false, false, info))
@@ -3820,6 +3870,11 @@ namespace
             vkCmdDraw(g_cmd, count, 1, 0, 0);
         MarkGpu(0);
         ++g_stats.issued;
+        ++g_passDraws;
+        g_passX0 = std::min(g_passX0, rect.offset.x);
+        g_passY0 = std::min(g_passY0, rect.offset.y);
+        g_passX1 = std::max(g_passX1, rect.offset.x + int32_t(rect.extent.width));
+        g_passY1 = std::max(g_passY1, rect.offset.y + int32_t(rect.extent.height));
         if (vs->shader->memexport_eM_written() || (pss && pss->memexport_eM_written()))
         {
             static uint32_t memexportLogs = 0;
@@ -4288,7 +4343,7 @@ namespace Renderer
     {
         if (!g_active) return false;
         BeginFrame();
-        EndPass();
+        EndPass("swap");
         Surface* s = FindSurfaceAt(frontBufferPhysical & 0x1FFFF000u);
         // The display reads the front buffer through the fetch constant's swizzle. D3D's ARGB
         // formats use X<->Z (red/blue exchanged): copy into a BGRA image, which reinterprets
@@ -4441,6 +4496,18 @@ namespace Renderer
             g_composedBuilds = g_composedUses = 0;
             std::printf("[render] last 120 frames GPU (ms): draws %.0f, resolves %.0f, uploads %.0f, other %.0f | %u render pass begins, %u barriers, %llu EDRAM tiles moved (%llu not copied: overwritten), %zu render targets\n",
                 g_gpuMs[0], g_gpuMs[1], g_gpuMs[2], g_gpuMs[3], g_passBegins, g_barriers, (unsigned long long)g_tileTransfers, (unsigned long long)g_tilesSkipped, g_rts.size());
+            {
+                const PassStats& s = g_passStats;
+                std::printf("[passes] last 120 frames: %llu draws in %u passes (0 draws %u, 1 draw %u, 2-4 %u, 5+ %u) | framebuffer load+store %.1f Mpx, touched by draws %.1f Mpx | ended by:",
+                    (unsigned long long)s.draws, s.byDraws[0] + s.byDraws[1] + s.byDraws[2] + s.byDraws[3], s.byDraws[0], s.byDraws[1], s.byDraws[2], s.byDraws[3],
+                    s.framebufferPixels / 1e6, s.touchedPixels / 1e6);
+                std::vector<std::pair<uint32_t, std::string>> reasons;
+                for (const auto& [why, n] : s.endReasons) reasons.emplace_back(n, why);
+                std::sort(reasons.rbegin(), reasons.rend());
+                for (const auto& [n, why] : reasons) std::printf(" %s %u,", why.c_str(), n);
+                std::printf("\n");
+                g_passStats = {};
+            }
             std::memset(g_gpuMs, 0, sizeof(g_gpuMs));
             g_passBegins = g_barriers = 0;
             g_tileTransfers = g_tilesSkipped = 0;
