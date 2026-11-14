@@ -266,7 +266,7 @@ namespace
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkFormat format = VK_FORMAT_UNDEFINED;
         VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-        uint32_t width = 0, height = 0, layers = 1, depth = 1;
+        uint32_t width = 0, height = 0, layers = 1, depth = 1, levels = 1;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
         VkImageView attachmentView = VK_NULL_HANDLE; // 2D, identity (render targets)
@@ -291,14 +291,14 @@ namespace
     }
 
     bool CreateImage(Image& img, VkFormat format, uint32_t w, uint32_t h, VkImageUsageFlags usage,
-        VkImageType type = VK_IMAGE_TYPE_2D, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, uint32_t layers = 1, uint32_t depth = 1)
+        VkImageType type = VK_IMAGE_TYPE_2D, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, uint32_t layers = 1, uint32_t depth = 1, uint32_t levels = 1)
     {
         VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ii.flags = viewType == VK_IMAGE_VIEW_TYPE_CUBE ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
         ii.imageType = type;
         ii.format = format;
         ii.extent = { w, h, depth };
-        ii.mipLevels = 1;
+        ii.mipLevels = levels;
         ii.arrayLayers = layers;
         ii.samples = VK_SAMPLE_COUNT_1_BIT;
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -318,6 +318,7 @@ namespace
         img.width = w;
         img.height = h;
         img.layers = layers;
+        img.levels = levels;
         img.depth = depth;
         img.viewType = viewType;
         img.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -346,7 +347,7 @@ namespace
         vi.format = img.format;
         vi.components = { VkComponentSwizzle(packedSwizzle & 7), VkComponentSwizzle((packedSwizzle >> 3) & 7),
             VkComponentSwizzle((packedSwizzle >> 6) & 7), VkComponentSwizzle((packedSwizzle >> 9) & 7) };
-        vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, img.layers };
+        vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, img.levels, 0, img.layers };
         VkImageView view = VK_NULL_HANDLE;
         vkCreateImageView(g_dev, &vi, nullptr, &view);
         img.views.emplace(packedSwizzle, view);
@@ -497,7 +498,7 @@ namespace
         b.dstAccessMask = AccessFor(to);
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = img.image;
-        b.subresourceRange = { img.aspect, 0, 1, 0, img.layers };
+        b.subresourceRange = { img.aspect, 0, img.levels, 0, img.layers };
         vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
         img.layout = to;
         ++g_barriers;
@@ -506,7 +507,7 @@ namespace
     void ClearImage(Image& img, const VkClearColorValue& color)
     {
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, img.layers };
+        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, img.levels, 0, img.layers };
         vkCmdClearColorImage(g_cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
     }
 
@@ -1925,20 +1926,35 @@ namespace
         }
     }
 
-    // Uploads the base level of a 2D texture from guest memory (records the copy).
+    // Uploads a 2D texture from guest memory with its mip levels (records the copies). Without the
+    // mips every texture was sampled at full resolution even far away: the pitch and other
+    // detailed textures shimmered like TV static in motion (2026-11-14). The levels are read from
+    // fetch.mip_address in the guest layout (texture_util), the smallest ones from the packed mip
+    // tail (GetPackedMipOffset), as Xenia does. PES_NO_MIPS=1: base level only (A/B).
     Texture* GetTexture(const xenos::xe_gpu_texture_fetch_t& fetch, const HostFormat& host)
     {
         PassEndContext passEndContext("texture upload");
         const uint32_t width = fetch.size_2d.width + 1, height = fetch.size_2d.height + 1;
         const uint32_t base = fetch.base_address << 12;
-        std::vector<uint32_t> key = { base, uint32_t(fetch.format), width, height, fetch.tiled, fetch.pitch, uint32_t(fetch.endianness) };
+        const uint32_t mipBase = fetch.mip_address << 12;
+        static const bool noMips = std::getenv("PES_NO_MIPS") != nullptr;
+        uint32_t levels = 1;
+        if (!noMips && mipBase && fetch.mip_max_level >= 1)
+        {
+            uint32_t maxLevel = 0;
+            while ((std::max(width, height) >> (maxLevel + 1)) >= 1) ++maxLevel; // down to the 1x1 level
+            levels = std::min<uint32_t>(fetch.mip_max_level, maxLevel) + 1;
+        }
+        std::vector<uint32_t> key = { base, uint32_t(fetch.format), width, height, fetch.tiled, fetch.pitch, uint32_t(fetch.endianness),
+            levels > 1 ? mipBase : 0, levels, fetch.packed_mips };
         auto& slot = g_textures[key];
         if (!slot)
         {
             if (width == 512 && height == 256 && !fetch.tiled && fetch.format == xenos::TextureFormat::k_8_8_8_8 && base >= 0x18000000u)
                 std::printf("[render] new 512x256 kit texture 0x%08X (frame %llu)\n", base, (unsigned long long)g_frame);
             slot = std::make_unique<Texture>();
-            if (!CreateImage(slot->img, host.format, width, height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+            if (!CreateImage(slot->img, host.format, width, height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 1, 1, levels))
             {
                 WarnOnce("texture creation failed");
                 slot.reset();
@@ -1962,15 +1978,17 @@ namespace
 
         const FormatInfo* info = FormatInfo::Get(fetch.format);
         const auto layout = texture_util::GetGuestTextureLayout(xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, 1,
-            fetch.tiled, fetch.format, fetch.packed_mips, true, 0);
+            fetch.tiled, fetch.format, fetch.packed_mips, true, levels - 1);
         const uint32_t blockW = info->block_width, blockH = info->block_height, bpb = info->bytes_per_block();
-        const uint32_t blocksX = (width + blockW - 1) / blockW, blocksY = (height + blockH - 1) / blockH;
         const uint32_t srcBytes = layout.base.level_data_extent_bytes;
         if (!srcBytes || base + srcBytes > kSharedMemorySize) return tex;
+        uint32_t mipBytes = levels > 1 ? layout.mips_total_extent_bytes : 0;
+        if (mipBytes && mipBase + mipBytes > kSharedMemorySize) mipBytes = 0;
 
         // PES_TEX_HASH=1: hash every frame (no write tracking), for A/B.
         static const bool texHashOnly = std::getenv("PES_TEX_HASH") != nullptr;
-        if (!texHashOnly && tex->watched && tex->uploadedFrame != ~0ull && !MemoryWatch::WrittenSince(base, srcBytes, tex->watchEpoch))
+        if (!texHashOnly && tex->watched && tex->uploadedFrame != ~0ull && !MemoryWatch::WrittenSince(base, srcBytes, tex->watchEpoch) &&
+            (!mipBytes || !MemoryWatch::WrittenSince(mipBase, mipBytes, tex->watchEpoch)))
         {
             tex->uploadedFrame = g_frame;
             return tex;
@@ -1978,14 +1996,19 @@ namespace
         // Epoch, then protect, then read the bytes (a write in between is recorded as newer).
         const uint32_t epoch = MemoryWatch::Epoch();
         const bool watch = !texHashOnly && tex->changedStreak < 3;
-        if (watch) MemoryWatch::Protect(base, srcBytes);
+        if (watch)
+        {
+            MemoryWatch::Protect(base, srcBytes);
+            if (mipBytes) MemoryWatch::Protect(mipBase, mipBytes);
+        }
         tex->watched = watch;
         tex->watchEpoch = epoch;
         // Skip the upload if the guest bytes did not change since the last one.
         const auto hashStart = std::chrono::steady_clock::now();
-        const uint64_t hash = XXH3_64bits(g_xeMemory.TranslatePhysical(base), srcBytes);
+        uint64_t hash = XXH3_64bits(g_xeMemory.TranslatePhysical(base), srcBytes);
+        if (mipBytes) hash ^= XXH3_64bits(g_xeMemory.TranslatePhysical(mipBase), mipBytes) * 0x9E3779B97F4A7C15ull;
         g_texHashUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - hashStart).count();
-        g_texHashBytes += srcBytes;
+        g_texHashBytes += srcBytes + mipBytes;
         if (tex->uploadedFrame != ~0ull && hash == tex->contentHash)
         {
             tex->uploadedFrame = g_frame;
@@ -1996,60 +2019,83 @@ namespace
         tex->contentHash = hash;
         ++g_time.textureUploads;
 
-        std::vector<uint8_t> src(srcBytes);
-        std::memcpy(src.data(), g_xeMemory.TranslatePhysical(base), srcBytes);
-        SwapDwords(src.data(), src.size(), fetch.endianness);
-
-        const bool decode = g_bcDecode && IsBC(fetch.format);
-        static std::vector<uint8_t> blocks; // decode path: linear blocks, then RGBA into the pool
-        VkDeviceSize offset = 0;
-        VkBuffer staging = VK_NULL_HANDLE;
-        uint8_t* dst = nullptr;
-        if (decode)
-        {
-            blocks.assign(size_t(blocksX) * blocksY * bpb, 0);
-            dst = blocks.data();
-        }
-        else if (!(dst = StagingAllocate(VkDeviceSize(blocksX) * blocksY * bpb, staging, offset)))
-            return tex;
         uint32_t bpbLog2 = 0;
         while ((1u << bpbLog2) < bpb) ++bpbLog2;
-        const uint32_t pitchBlocks = layout.base.row_pitch_bytes / bpb; // tiled: aligned to 32 blocks
-        for (uint32_t by = 0; by < blocksY; ++by)
-            for (uint32_t bx = 0; bx < blocksX; ++bx)
-            {
-                const uint32_t s = fetch.tiled ? uint32_t(texture_address::Tiled2D(int32_t(bx), int32_t(by), pitchBlocks, bpbLog2))
-                                               : by * layout.base.row_pitch_bytes + bx * bpb;
-                if (s + bpb <= srcBytes)
-                    std::memcpy(dst + (size_t(by) * blocksX + bx) * bpb, src.data() + s, bpb);
-            }
-
-        VkBufferImageCopy copy{};
-        if (decode)
+        const bool decode = g_bcDecode && IsBC(fetch.format);
+        static std::vector<uint8_t> src, blocks;
+        std::vector<VkBufferImageCopy> copies;
+        std::vector<VkBuffer> buffers; // the staging buffer of each copy
+        for (uint32_t level = 0; level < levels; ++level)
         {
-            // Blocks -> RGBA8 rows of blocksX * 4 pixels; the copy takes the image's width x height of them.
-            const uint32_t rowPixels = blocksX * 4;
-            uint8_t* rgba = StagingAllocate(VkDeviceSize(rowPixels) * blocksY * 4 * 4, staging, offset);
-            if (!rgba) return tex;
-            uint8_t px[16 * 4];
+            if (level && !mipBytes) break;
+            // Where this level's blocks are: the base, a mip level, or a sub-rectangle of the packed tail.
+            const uint32_t guestLevel = level ? std::min(level, layout.packed_level) : 0;
+            const auto& l = level ? layout.mips[guestLevel] : layout.base;
+            const uint32_t from = level ? mipBase + layout.mip_offsets_bytes[guestLevel] : base;
+            const uint32_t bytes = l.level_data_extent_bytes;
+            if (!bytes || from + bytes > kSharedMemorySize) break;
+            uint32_t ox = 0, oy = 0, oz = 0;
+            if (level && level >= layout.packed_level)
+                texture_util::GetPackedMipOffset(width, height, 1, fetch.format, level, ox, oy, oz);
+            const uint32_t lw = std::max(width >> level, 1u), lh = std::max(height >> level, 1u);
+            const uint32_t blocksX = (lw + blockW - 1) / blockW, blocksY = (lh + blockH - 1) / blockH;
+            src.resize(bytes);
+            std::memcpy(src.data(), g_xeMemory.TranslatePhysical(from), bytes);
+            SwapDwords(src.data(), src.size(), fetch.endianness);
+            uint8_t* dst = nullptr;
+            VkDeviceSize offset = 0;
+            VkBuffer staging = VK_NULL_HANDLE;
+            if (decode)
+            {
+                blocks.assign(size_t(blocksX) * blocksY * bpb, 0);
+                dst = blocks.data();
+            }
+            else if (!(dst = StagingAllocate(VkDeviceSize(blocksX) * blocksY * bpb, staging, offset)))
+                break;
+            const uint32_t pitchBlocks = l.row_pitch_bytes / bpb; // tiled: aligned to 32 blocks
             for (uint32_t by = 0; by < blocksY; ++by)
                 for (uint32_t bx = 0; bx < blocksX; ++bx)
                 {
-                    DecodeBCBlock(fetch.format, blocks.data() + (size_t(by) * blocksX + bx) * bpb, px);
-                    for (uint32_t y = 0; y < 4; ++y)
-                        std::memcpy(rgba + ((size_t(by) * 4 + y) * rowPixels + bx * 4) * 4, px + y * 16, 16);
+                    const uint32_t sx = bx + ox, sy = by + oy;
+                    const uint32_t s = fetch.tiled ? uint32_t(texture_address::Tiled2D(int32_t(sx), int32_t(sy), pitchBlocks, bpbLog2))
+                                                   : sy * l.row_pitch_bytes + sx * bpb;
+                    if (s + bpb <= bytes)
+                        std::memcpy(dst + (size_t(by) * blocksX + bx) * bpb, src.data() + s, bpb);
                 }
-            copy.bufferRowLength = rowPixels;
-            copy.bufferImageHeight = blocksY * 4;
+            VkBufferImageCopy copy{};
+            if (decode)
+            {
+                // Blocks -> RGBA8 rows of blocksX * 4 pixels; the copy takes the level's lw x lh of them.
+                const uint32_t rowPixels = blocksX * 4;
+                uint8_t* rgba = StagingAllocate(VkDeviceSize(rowPixels) * blocksY * 4 * 4, staging, offset);
+                if (!rgba) break;
+                uint8_t px[16 * 4];
+                for (uint32_t by = 0; by < blocksY; ++by)
+                    for (uint32_t bx = 0; bx < blocksX; ++bx)
+                    {
+                        DecodeBCBlock(fetch.format, blocks.data() + (size_t(by) * blocksX + bx) * bpb, px);
+                        for (uint32_t y = 0; y < 4; ++y)
+                            std::memcpy(rgba + ((size_t(by) * 4 + y) * rowPixels + bx * 4) * 4, px + y * 16, 16);
+                    }
+                copy.bufferRowLength = rowPixels;
+                copy.bufferImageHeight = blocksY * 4;
+            }
+            else
+            {
+                copy.bufferRowLength = blocksX * blockW;
+                copy.bufferImageHeight = blocksY * blockH;
+            }
+            copy.bufferOffset = offset;
+            copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
+            copy.imageExtent = { lw, lh, 1 }; // the whole level (allowed for block formats when not a block multiple)
+            copies.push_back(copy);
+            buffers.push_back(staging);
         }
+        if (copies.empty()) return tex;
         Transition(tex->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        copy.bufferOffset = offset;
-        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copy.imageExtent = { blocksX * blockW, blocksY * blockH, 1 };
-        copy.imageExtent.width = std::min(copy.imageExtent.width, width) == width ? width : copy.imageExtent.width;
-        copy.imageExtent.height = std::min(copy.imageExtent.height, height) == height ? height : copy.imageExtent.height;
         MarkGpu(3);
-        vkCmdCopyBufferToImage(g_cmd, staging, tex->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        for (size_t i = 0; i < copies.size(); ++i)
+            vkCmdCopyBufferToImage(g_cmd, buffers[i], tex->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copies[i]);
         MarkGpu(2);
         tex->uploadedFrame = g_frame;
         return tex;
@@ -2439,18 +2485,36 @@ namespace
         texture_util::GetClampModesForDimension(fetch, cx, cy, cz);
         const bool usesBorder = xenos::ClampModeUsesBorder(cx) || xenos::ClampModeUsesBorder(cy) || xenos::ClampModeUsesBorder(cz);
         const uint32_t border = usesBorder ? uint32_t(fetch.border_color) : 0u;
+        // Mip filter and level range (GetTexture uploads the mip levels), anisotropic filtering as
+        // the game asks for it. PES_NO_MIPS=1: base level only (A/B).
+        static const bool noMips = std::getenv("PES_NO_MIPS") != nullptr;
+        const auto mip = noMips ? xenos::TextureFilter::kBaseMap : pick(binding.mip_filter, fetch.mip_filter);
+        const auto aniso = binding.aniso_filter == xenos::AnisoFilter::kUseFetchConst ? fetch.aniso_filter : binding.aniso_filter;
+        const uint32_t minLevel = fetch.mip_min_level, maxLevel = std::max<uint32_t>(fetch.mip_max_level, minLevel);
         const uint64_t key = uint64_t(mag) | (uint64_t(min) << 2) | (uint64_t(cx) << 4) | (uint64_t(cy) << 7) |
-            (uint64_t(cz) << 10) | (uint64_t(border) << 13);
+            (uint64_t(cz) << 10) | (uint64_t(border) << 13) | (uint64_t(mip) << 16) | (uint64_t(aniso) << 18) |
+            (uint64_t(minLevel) << 21) | (uint64_t(maxLevel) << 25);
         auto it = g_samplers.find(key);
         if (it != g_samplers.end()) return it->second;
         VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         si.magFilter = mag == xenos::TextureFilter::kLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         si.minFilter = min == xenos::TextureFilter::kLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.mipmapMode = mip == xenos::TextureFilter::kLinear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
         si.addressModeU = AddressMode(cx);
         si.addressModeV = AddressMode(cy);
         si.addressModeW = AddressMode(cz);
-        si.maxLod = 0.25f;
+        if (mip == xenos::TextureFilter::kBaseMap)
+            si.maxLod = 0.25f; // base level only
+        else
+        {
+            si.minLod = float(minLevel);
+            si.maxLod = float(maxLevel); // images have fewer levels when the game stores fewer (clamped by Vulkan)
+        }
+        if (aniso >= xenos::AnisoFilter::kMax_2_1 && aniso <= xenos::AnisoFilter::kMax_16_1 && g_vk->enabledFeatures.samplerAnisotropy)
+        {
+            si.anisotropyEnable = VK_TRUE;
+            si.maxAnisotropy = std::min(float(1u << (uint32_t(aniso) - 1)), g_vk->properties.limits.maxSamplerAnisotropy);
+        }
         si.borderColor = border == uint32_t(xenos::BorderColor::k_ABGR_White) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
                                                                                : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         VkSampler s = VK_NULL_HANDLE;
