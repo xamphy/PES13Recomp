@@ -58,19 +58,29 @@ Format: **title** - symptom. Where / notes. (source / date)
 
 - **Free Training hangs after a match** - after finishing one match, entering Free Training stays on
   the loading screen (waited 2 min). After a restart of the app it loads at once. Not in the run #17
-  log: that log starts after the restart. Not yet checked on Windows. (tester, iPad run #17, 2026-11-12)
+  log: that log starts after the restart. Does NOT reproduce on Windows (2026-11-14: full match, results
+  "Return to Top Menu", Training, Free Training loads in ~10 s). Build #20+ keep one log per session and
+  dump the guest threads when the app goes to the background - need a log of a hang. (tester, iPad run
+  #17, 2026-11-12)
 - **Heavy scenes slow on iPad** (GPU-bound) - tester on run #17: match play 60 fps (54 sometimes, ~50
   near the goals), replays 15-23 fps, goal celebration 13 fps, Free Training a steady 30 fps, Become a
   Legend cutscenes 20 fps. Log: those scenes take 33-65 ms of GPU time per frame with ~47-49 render
   passes (about 25 one-draw passes ended by resolves, about 6 empty passes, ~26 Mpx framebuffer
   load+store per frame). Device was "thermal serious" from launch. (tester + log, 2026-11-12)
+  2026-11-14: resolve skip, pass areas, discard loads and clear fills (builds #20-#26; Windows: GPU
+  -22..25%, tile copies -80%) - iPad effect not measured yet; the log now splits GPU time by category.
 - **4 GB guest reservation needs `extended-virtual-addressing`** - a free Apple ID may drop this
-  entitlement. If it does, `pes13.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
+  entitlement. If it does, the session's `logs/pes13 <date> <time>.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
   a paid developer account, or shrink the reservation. (IPAD.md)
 - **Slow first launch** - shaders are translated on first use and cached in `userdata`. (IPAD.md)
 
 ## Fixed (recent, for reference)
 
+- 2026-11-14 - **Pitch shimmered like TV static in motion** (user, d82f660): textures had one mip level
+  and samplers maxLod 0.25, so distant surfaces were sampled at full resolution. The guest mip chain
+  (packed tail included) is now uploaded and sampled with the game's mip filter, level range and
+  anisotropy. `PES_NO_MIPS=1` = old behaviour. Checked on Windows stills; in motion still to be
+  confirmed by the user.
 - 2026-11-10 - 188 `// ERROR` branches in 15 functions (branch `fix-error-branches`, commit 45d71a0):
   14 jump-table functions had hand-set sizes in `config/pes13.toml` that stopped before their last
   few instructions (the Game Plan bug again), so every `switch` case that jumped to the shared end
