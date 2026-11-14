@@ -56,14 +56,18 @@ Format: **title** - symptom. Where / notes. (source / date)
 
 ## Open - iPad / Apple
 
-- **Never run on a device** - the .ipa builds in CI, but nothing on the device has been tested.
-  (2026-11-09)
+- **Free Training hangs after a match** - after finishing one match, entering Free Training stays on
+  the loading screen (waited 2 min). After a restart of the app it loads at once. Not in the run #17
+  log: that log starts after the restart. Not yet checked on Windows. (tester, iPad run #17, 2026-11-12)
+- **Heavy scenes slow on iPad** (GPU-bound) - tester on run #17: match play 60 fps (54 sometimes, ~50
+  near the goals), replays 15-23 fps, goal celebration 13 fps, Free Training a steady 30 fps, Become a
+  Legend cutscenes 20 fps. Log: those scenes take 33-65 ms of GPU time per frame with ~47-49 render
+  passes (about 25 one-draw passes ended by resolves, about 6 empty passes, ~26 Mpx framebuffer
+  load+store per frame). Device was "thermal serious" from launch. (tester + log, 2026-11-12)
 - **4 GB guest reservation needs `extended-virtual-addressing`** - a free Apple ID may drop this
   entitlement. If it does, `pes13.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
   a paid developer account, or shrink the reservation. (IPAD.md)
-- **No touch controls** - a Bluetooth controller is needed. (IPAD.md)
 - **Slow first launch** - shaders are translated on first use and cached in `userdata`. (IPAD.md)
-- **MoltenVK feature gaps / M2 performance unknown.**
 
 ## Fixed (recent, for reference)
 

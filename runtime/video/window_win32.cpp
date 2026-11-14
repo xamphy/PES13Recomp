@@ -1,5 +1,6 @@
 // Windows window for the presenter: Win32 window on its own message-pump thread.
 // (Moved unchanged out of presenter.cpp.)
+#include "launcher/launcher_win32.h"
 #include "window.h"
 #include "presenter.h"
 
@@ -139,7 +140,13 @@ namespace
 namespace Video
 {
     // Windows: the game runs on the process main thread, as before.
-    int RunMain(int (*appMain)(int, char**), int argc, char** argv) { return appMain(argc, argv); }
+    int RunMain(int (*appMain)(int, char**), int argc, char** argv)
+    {
+        // Launch menu first (not for automated runs); closing it quits.
+        if (Launcher::ShouldShowWin32(argc, argv) && !Launcher::RunWin32())
+            return 0;
+        return appMain(argc, argv);
+    }
 
     bool PromptText(const std::u16string& title, const std::u16string& description, std::u16string& text, uint32_t maxChars)
     {

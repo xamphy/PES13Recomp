@@ -21,6 +21,16 @@ namespace Video
 
     void SetTitle(const std::string& title);
 
+    // Upscaling of the game picture to the window (presenter.cpp): plain linear filtering, AMD
+    // FSR 1 (EASU + RCAS) or Snapdragon GSR 1. Any thread; takes effect at the next frame.
+    // Initial value: PES_UPSCALER=off|fsr|sgsr (default off).
+    enum class Upscaler { Off = 0, Fsr1 = 1, Sgsr1 = 2 };
+    void SetUpscaler(Upscaler upscaler);
+    Upscaler GetUpscaler();
+    // Height of the upscaler's output (0: the on-screen size). A lower one costs less GPU time; the
+    // result is then scaled to the screen with linear filtering. Initial value: PES_UPSCALE_HEIGHT.
+    void SetUpscaleHeight(uint32_t height);
+
     // Performance numbers for the on-screen overlay (iPadOS: drawn in the letterbox bar).
     // The GPU thread publishes them once per second; any thread may read them.
     struct PerfStats

@@ -83,11 +83,12 @@ add_executable(pes13
     runtime/kernel/xex_module.cpp
     runtime/kernel/xam_user.cpp
     runtime/video/presenter.cpp
+    runtime/launcher/launcher_core.cpp
 )
 # Window behind the presenter: Win32 on Windows; SDL3 on Apple (thirdparty/SDL, zlib license),
 # where the window and event loop must own the main thread. SDL is not used on Windows.
 if (WIN32)
-    target_sources(pes13 PRIVATE runtime/video/window_win32.cpp)
+    target_sources(pes13 PRIVATE runtime/video/window_win32.cpp runtime/launcher/launcher_win32.cpp)
 else()
     target_sources(pes13 PRIVATE runtime/video/window_sdl.cpp runtime/video/prompt_apple.mm)
     # Native text prompt (UIKit / AppKit): Objective-C++ with ARC, built by the C++ compiler.
@@ -95,10 +96,11 @@ else()
     if (IOS)
         # On-screen touch controls (UIKit overlay over the game view).
         # Performance overlay in the letterbox bar (UIKit, under the touch controls).
-        target_sources(pes13 PRIVATE runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm)
-        set_source_files_properties(runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm
+        # Launch menu before the game (settings, Start).
+        target_sources(pes13 PRIVATE runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm runtime/video/launcher_ios.mm)
+        set_source_files_properties(runtime/video/touch_controls_ios.mm runtime/video/perf_overlay_ios.mm runtime/video/launcher_ios.mm
             PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc")
-        target_link_libraries(pes13 PRIVATE "-framework UIKit")
+        target_link_libraries(pes13 PRIVATE "-framework UIKit" "-framework Metal")
     else()
         target_link_libraries(pes13 PRIVATE "-framework AppKit")
     endif()
@@ -117,6 +119,13 @@ else()
 endif()
 target_include_directories(pes13 PRIVATE runtime runtime/kernel)
 target_compile_definitions(pes13 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+# Build commit for the launch menu (About page); taken at configure time.
+execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE PES_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if (NOT PES_GIT_COMMIT)
+    set(PES_GIT_COMMIT "unknown")
+endif()
+set_source_files_properties(runtime/launcher/launcher_core.cpp PROPERTIES COMPILE_DEFINITIONS "PES_BUILD_COMMIT=\"${PES_GIT_COMMIT}\"")
 include(cmake/xenia_shader.cmake)
 
 # Vulkan: headers + volk (loads vulkan-1 at runtime, no SDK or import library needed)

@@ -93,7 +93,10 @@ namespace
     constexpr uint32_t kFramesInFlight = 2;
     uint32_t g_tsCount = 0;
     uint8_t* g_tsCategory = nullptr; // the current frame slot's array
-    double g_gpuMs[4] = {};
+    uint64_t* g_tsShader = nullptr;   // the current frame slot's shader per timestamp (GPU time per shader, see MarkGpu)
+    uint64_t g_markShader = 0;        // set around a draw: its pixel shader hash
+    std::map<uint64_t, std::pair<double, uint32_t>> g_shaderGpuMs; // pixel shader -> GPU ms, draws (last 120 frames)
+    double g_gpuMs[5] = {}; // by category: 0 draws (render passes), 1 resolves, 2 uploads, 3 other, 4 EDRAM tile transfers
     uint32_t g_passBegins = 0, g_barriers = 0;
 
     // Render pass statistics (printed every 120 frames): why passes end, how many draws they
@@ -116,6 +119,7 @@ namespace
     uint32_t g_passDraws = 0;
     int32_t g_passX0 = 0, g_passY0 = 0, g_passX1 = 0, g_passY1 = 0; // union of the draws' scissors
     VkExtent2D g_passExtent{};
+    VkExtent2D g_passNeed{}; // union of the area the current pass's draws / clears needed (BeginPass)
     void MarkGpu(uint8_t category, bool frameBoundary = false);
 
     struct ScopedTimer
@@ -149,6 +153,23 @@ namespace
     // Vulkan memory in use, by kind (bytes as allocated), for the [mem] report.
     struct MemCounters { uint64_t hostBuffers = 0, deviceBuffers = 0, images = 0, imageCount = 0, imagesFreed = 0, poolExhausted = 0; } g_mem;
 
+    // vkAllocateMemory with a log line on failure (the first 20), so running out of GPU memory
+    // (iPad: shared with the app's memory limit) shows in the log instead of failing silently.
+    bool AllocateMemory(const VkMemoryAllocateInfo& ai, VkDeviceMemory* out, const char* what)
+    {
+        const VkResult r = ai.memoryTypeIndex == UINT32_MAX ? VK_ERROR_FEATURE_NOT_PRESENT
+                                                             : vkAllocateMemory(g_dev, &ai, nullptr, out);
+        if (r == VK_SUCCESS)
+            return true;
+        static std::atomic<int> reported{ 0 };
+        if (reported.fetch_add(1) < 20)
+            std::fprintf(stderr, "[render] %s: allocating %llu KB failed (VkResult %d, memory type %u) | in use: host buffers %llu MB, device buffers %llu MB, images %llu MB in %llu\n",
+                what, (unsigned long long)(ai.allocationSize >> 10), int(r), ai.memoryTypeIndex,
+                (unsigned long long)(g_mem.hostBuffers >> 20), (unsigned long long)(g_mem.deviceBuffers >> 20),
+                (unsigned long long)(g_mem.images >> 20), (unsigned long long)g_mem.imageCount);
+        return false;
+    }
+
     // ------------------------------------------------------------------ buffers
     struct Buffer
     {
@@ -181,7 +202,7 @@ namespace
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(g_dev, &ai, nullptr, &b.memory) != VK_SUCCESS) return false;
+        if (!AllocateMemory(ai, &b.memory, "host buffer")) return false;
         vkBindBufferMemory(g_dev, b.buffer, b.memory, 0);
         b.allocSize = req.size;
         b.hostVisible = true;
@@ -205,7 +226,7 @@ namespace
         VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(g_dev, &ai, nullptr, &b.memory) != VK_SUCCESS) return false;
+        if (!AllocateMemory(ai, &b.memory, "device buffer")) return false;
         vkBindBufferMemory(g_dev, b.buffer, b.memory, 0);
         b.allocSize = req.size;
         g_mem.deviceBuffers += req.size;
@@ -288,7 +309,7 @@ namespace
         VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(g_dev, &ai, nullptr, &img.memory) != VK_SUCCESS) return false;
+        if (!AllocateMemory(ai, &img.memory, "image")) return false;
         vkBindImageMemory(g_dev, img.image, img.memory, 0);
         img.allocSize = req.size;
         g_mem.images += req.size;
@@ -505,6 +526,7 @@ namespace
         VkQueryPool timestamps = VK_NULL_HANDLE;
         Buffer uniforms, uploads;
         std::vector<uint8_t> tsCategory = std::vector<uint8_t>(kMaxTimestamps);
+        std::vector<uint64_t> tsShader = std::vector<uint64_t>(kMaxTimestamps); // pixel shader of a draw interval (category 0)
         uint32_t tsCount = 0;
         bool pending = false; // submitted, not waited for yet
     };
@@ -529,7 +551,11 @@ namespace
             {
                 const double period = g_vk->properties.limits.timestampPeriod / 1e6; // ns -> ms
                 for (uint32_t i = 1; i < s.tsCount; ++i)
-                    g_gpuMs[s.tsCategory[i]] += double(ts[i] - ts[i - 1]) * period;
+                {
+                    const double ms = double(ts[i] - ts[i - 1]) * period;
+                    g_gpuMs[s.tsCategory[i]] += ms;
+                    if (s.tsShader[i]) { auto& e = g_shaderGpuMs[s.tsShader[i]]; e.first += ms; ++e.second; }
+                }
                 g_time.gpuSpanUs += uint64_t(double(ts[s.tsCount - 1] - ts[0]) * period * 1000.0); // first to last timestamp
             }
         }
@@ -556,6 +582,7 @@ namespace
         g_descriptorPool = s.pool;
         g_tsPool = s.timestamps;
         g_tsCategory = s.tsCategory.data();
+        g_tsShader = s.tsShader.data();
         // Pools that overflowed in the frame just recorded: grow the target to 1.5x what it needed;
         // this slot's buffers are idle now (WaitSlot) and are recreated if smaller than the target.
         for (Pool* p : { &g_uniforms, &g_uploads })
@@ -687,13 +714,15 @@ namespace
 #ifdef __APPLE__
         // Apple GPUs sample counters only at encoder boundaries: MoltenVK ends the current Metal
         // render encoder for every timestamp, so per-draw marks split render passes (costly on
-        // the tile-based GPU; the iPad got slower when timestamps started working). Keep only
-        // the frame start / end marks: total GPU time per frame (the "GPU busy" figure).
-        if (!frameBoundary) return;
+        // the tile-based GPU; the iPad got slower when timestamps started working). Marks inside a
+        // render pass are dropped; BeginPass / EndPass mark the pass edges instead (category 3
+        // before, 0 after), so the categories still split draws / resolves / uploads / transfers.
+        if (!frameBoundary && g_inPass) return;
 #else
         (void)frameBoundary;
 #endif
         g_tsCategory[g_tsCount] = category;
+        g_tsShader[g_tsCount] = category == 0 ? g_markShader : 0;
         vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsPool, g_tsCount++);
     }
 
@@ -734,6 +763,7 @@ namespace
         xenos::MsaaSamples msaa = xenos::MsaaSamples::k1X;
         uint32_t tileW = 80, tileH = 16; // tile size in pixels
         uint32_t lastSourceW = 0, lastSourceH = 0; // size of the first texture the last draw into it sampled
+        uint64_t writeSerial = 0; // bumped by anything that writes the image (draws, clears, tile transfers): deferred resolve copies
         Image img;
         // Depth/stencil: guest format D24FS8 (20e4 float depth), aspect views for the depth -> color transfer.
         bool depthFloat = false;
@@ -748,16 +778,37 @@ namespace
     };
     std::map<std::tuple<uint32_t, VkFormat, uint32_t, uint32_t>, std::unique_ptr<RenderTarget>> g_rts;
     RenderTarget* g_tileOwner[xenos::kEdramTileCount] = {};
+    // Cleared EDRAM tiles: `by` (the tile's owner) last wrote it with a single clear value. When
+    // another render target claims such a tile (PES clears through a 4x-MSAA alias of a target,
+    // then draws into the 1x one), the tile is filled with that value inside the claimant's render
+    // pass instead of being copied (a transfer between passes; it splits passes on the iPad).
+    // Any other write to the tile forgets the value. PES_NO_CLEAR_FILL=1 / "clearfill off": copy (A/B).
+    struct TileClear { RenderTarget* by = nullptr; VkClearValue value{}; };
+    TileClear g_tileClear[xenos::kEdramTileCount] = {};
+    struct TileFill { VkRect2D rect; VkClearValue value; };
+    bool g_noClearFill = std::getenv("PES_NO_CLEAR_FILL") != nullptr;
+    uint64_t g_depthClearDrawsKnown = 0;
+    uint64_t g_tilesFilled = 0, g_clearDraws = 0, g_clearDrawsKnown = 0; // stats: clear draws examined / with a constant color
     uint64_t g_tileTransfers = 0;
     uint64_t g_rtsEvicted = 0;
-    std::map<std::pair<VkFormat, VkFormat>, VkRenderPass> g_renderPasses;               // (color, depth)
-    std::map<std::pair<RenderTarget*, RenderTarget*>, VkFramebuffer> g_framebuffers;     // (color, depth)
+    std::map<std::tuple<VkFormat, VkFormat, bool, bool>, VkRenderPass> g_renderPasses; // (color, depth, load color, load depth)
+    std::map<std::tuple<RenderTarget*, RenderTarget*, uint32_t, uint32_t>, VkFramebuffer> g_framebuffers; // (color, depth, width, height)
+    // Pass areas (BeginPass): the n-th pass on the same attachments in a frame -> the area it needed.
+    struct PassArea { VkExtent2D extent{}; uint64_t frame = 0; };
+    std::map<std::tuple<RenderTarget*, RenderTarget*, uint32_t>, PassArea> g_passAreaHistory;
+    std::map<std::pair<RenderTarget*, RenderTarget*>, uint32_t> g_passSlots; // passes begun this frame per attachments
+    uint64_t g_passSlotFrame = ~0ull;
+    uint32_t g_passSlot = 0; // the current pass's n
+    bool g_fullPasses = std::getenv("PES_PASS_FULL") != nullptr; // whole-image passes (A/B; PES_CONTROL "passes full/area")
+    bool g_noDiscardLoads = std::getenv("PES_NO_DISCARD_LOADS") != nullptr; // see BeginPass
+    uint64_t g_discardedLoadPixels = 0; // attachment pixels not loaded (stats)
     constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT; // also on Apple GPUs (no D24S8 there)
 
     // Render pass with an optional color attachment (0) and an optional depth/stencil attachment.
-    VkRenderPass RenderPassFor(VkFormat color, VkFormat depth)
+    // loadColor / loadDepth false: the pass starts by overwriting the whole attachment (DONT_CARE).
+    VkRenderPass RenderPassFor(VkFormat color, VkFormat depth, bool loadColor = true, bool loadDepth = true)
     {
-        auto it = g_renderPasses.find({ color, depth });
+        auto it = g_renderPasses.find({ color, depth, loadColor, loadDepth });
         if (it != g_renderPasses.end()) return it->second;
         VkAttachmentDescription a[2]{};
         VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -770,7 +821,7 @@ namespace
             a[count] = {};
             a[count].format = color;
             a[count].samples = VK_SAMPLE_COUNT_1_BIT;
-            a[count].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a[count].loadOp = loadColor ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a[count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             a[count].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a[count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -784,7 +835,7 @@ namespace
             a[count] = {};
             a[count].format = depth;
             a[count].samples = VK_SAMPLE_COUNT_1_BIT;
-            a[count].loadOp = a[count].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a[count].loadOp = a[count].stencilLoadOp = loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a[count].storeOp = a[count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
             a[count].initialLayout = a[count].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             depthRef.attachment = count++;
@@ -797,7 +848,7 @@ namespace
         ci.pSubpasses = &sp;
         VkRenderPass pass = VK_NULL_HANDLE;
         vkCreateRenderPass(g_dev, &ci, nullptr, &pass);
-        g_renderPasses.emplace(std::make_pair(color, depth), pass);
+        g_renderPasses.emplace(std::make_tuple(color, depth, loadColor, loadDepth), pass);
         return pass;
     }
 
@@ -918,6 +969,7 @@ namespace
         if (!rt) return;
         rows = std::min(rows, rt->fullHeight);
         if (rows <= rt->img.height) return;
+        ++rt->writeSerial; // a new image (content copied over)
         // Grow by at least half (few regrowths), whole tile rows.
         uint32_t height = std::max(rows, rt->img.height + rt->img.height / 2);
         height = std::min(rt->fullHeight, (height + rt->tileH - 1) / rt->tileH * rt->tileH);
@@ -948,7 +1000,7 @@ namespace
         for (VkImageView v : { rt->depthView, rt->stencilView }) if (v) r.views.push_back(v);
         rt->depthView = rt->stencilView = VK_NULL_HANDLE; // recreated on demand (AspectView)
         for (auto fb = g_framebuffers.begin(); fb != g_framebuffers.end();)
-            if (fb->first.first == rt || fb->first.second == rt) { r.framebuffers.push_back(fb->second); fb = g_framebuffers.erase(fb); }
+            if (std::get<0>(fb->first) == rt || std::get<1>(fb->first) == rt) { r.framebuffers.push_back(fb->second); fb = g_framebuffers.erase(fb); }
             else ++fb;
         r.img = std::move(rt->img);
         g_retired.push_back(std::move(r));
@@ -1182,8 +1234,33 @@ namespace
 
     // noCopy: tiles entirely inside it are about to be completely overwritten (a clear): take
     // ownership without copying their old content.
+    // After `rt` wrote `value` over `area` (a clear): whole tiles inside it remember the value,
+    // tiles it only partly covers forget theirs.
+    void MarkTilesCleared(RenderTarget* rt, const VkRect2D& area, const VkClearValue& value, bool known = true)
+    {
+        if (!rt || !area.extent.width || !area.extent.height || area.offset.x < 0 || area.offset.y < 0) return;
+        const int32_t ax1 = area.offset.x + int32_t(area.extent.width), ay1 = area.offset.y + int32_t(area.extent.height);
+        const uint32_t c0 = uint32_t(area.offset.x) / rt->tileW, r0 = uint32_t(area.offset.y) / rt->tileH;
+        const uint32_t c1 = std::min(uint32_t(ax1 - 1) / rt->tileW, rt->pitchTiles - 1), r1 = uint32_t(ay1 - 1) / rt->tileH;
+        for (uint32_t r = r0; r <= r1; ++r)
+            for (uint32_t c = c0; c <= c1; ++c)
+            {
+                const uint32_t local = r * rt->pitchTiles + c;
+                if (local >= xenos::kEdramTileCount) return;
+                const uint32_t e = (rt->base + local) & (xenos::kEdramTileCount - 1);
+                const int32_t tx = int32_t(c * rt->tileW), ty = int32_t(r * rt->tileH);
+                const bool whole = tx >= area.offset.x && ty >= area.offset.y && tx + int32_t(rt->tileW) <= ax1 && ty + int32_t(rt->tileH) <= ay1;
+                if (whole && known && g_tileOwner[e] == rt) g_tileClear[e] = { rt, value };
+                else g_tileClear[e].by = nullptr;
+            }
+    }
+
+    // fills (draws only): cleared tiles of another target (g_tileClear) are not copied but listed
+    // here, to be cleared inside the draw's render pass. writes: the caller writes the area (forgets
+    // the tiles' clear values; a resolve only reads).
     uint64_t g_tilesSkipped = 0;
-    void AcquireTiles(RenderTarget* rt, int32_t x, int32_t y, uint32_t w, uint32_t h, const VkRect2D* noCopy = nullptr)
+    void AcquireTiles(RenderTarget* rt, int32_t x, int32_t y, uint32_t w, uint32_t h, const VkRect2D* noCopy = nullptr,
+        std::vector<TileFill>* fills = nullptr, bool writes = false)
     {
         PassEndContext passEndContext("EDRAM tile transfer");
         if (!rt || !w || !h || x < 0 || y < 0) return;
@@ -1204,6 +1281,9 @@ namespace
                 const uint32_t e = (rt->base + local) & (xenos::kEdramTileCount - 1);
                 RenderTarget* o = g_tileOwner[e];
                 g_tileOwner[e] = rt;
+                TileClear& tc = g_tileClear[e];
+                const bool cleared = o && tc.by == o;
+                if (writes || (cleared && o != rt && !fills)) tc.by = nullptr; // written / copied below: value forgotten
                 if (!o || o == rt) continue;
                 if (noCopy)
                 {
@@ -1213,6 +1293,17 @@ namespace
                         ty + int32_t(rt->tileH) <= noCopy->offset.y + int32_t(noCopy->extent.height))
                     {
                         ++g_tilesSkipped;
+                        continue;
+                    }
+                }
+                if (fills && cleared && !g_noClearFill && o->format == rt->format && o->isDepth == rt->isDepth)
+                {
+                    const int32_t dx = int32_t(c * rt->tileW), dy = int32_t(r * rt->tileH);
+                    if (uint32_t(dx) + rt->tileW <= rt->img.width && uint32_t(dy) + rt->tileH <= rt->img.height)
+                    {
+                        fills->push_back({ { { dx, dy }, { rt->tileW, rt->tileH } }, tc.value });
+                        if (!writes) tc.by = rt; // rt will hold the same value
+                        ++g_tilesFilled;
                         continue;
                     }
                 }
@@ -1270,6 +1361,9 @@ namespace
                     p->copies.push_back(cp);
                 }
             }
+        const bool transfers = !d2c.empty() || !pending.empty();
+        if (transfers) MarkGpu(3), ++rt->writeSerial;
+        struct TransferMark { bool on; ~TransferMark() { if (on) MarkGpu(4); } } transferMark{ transfers };
         for (auto& [from, tiles] : d2c)
         {
             DepthToColor(from, rt, tiles, rt->tileW, rt->tileH);
@@ -1319,8 +1413,15 @@ namespace
             s.touchedPixels += uint64_t(std::min<int32_t>(g_passX1, int32_t(g_passExtent.width)) - g_passX0) *
                 uint64_t(std::min<int32_t>(g_passY1, int32_t(g_passExtent.height)) - g_passY0);
         vkCmdEndRenderPass(g_cmd);
+        // Area this pass needed (predicts the same pass next frame, see BeginPass).
+        {
+            PassArea& h = g_passAreaHistory[{ g_passColor, g_passDepth, g_passSlot }];
+            if (h.frame != g_frame) h = { g_passNeed, g_frame };
+            else h.extent = { std::max(h.extent.width, g_passNeed.width), std::max(h.extent.height, g_passNeed.height) };
+        }
         g_inPass = false;
         g_passColor = g_passDepth = nullptr;
+        MarkGpu(0); // the pass (its draws)
     }
 
     // Framebuffer size: the smaller of the attachments.
@@ -1332,15 +1433,63 @@ namespace
         return e;
     }
 
-    void BeginPass(RenderTarget* color, RenderTarget* depth)
+    // Pass area: a pass loads and stores its whole framebuffer (on the iPad's tile-based GPU that is
+    // memory traffic for every pixel of it), so the framebuffer covers only what the pass draws:
+    // from the origin to the bottom-right of its draws / clears (`need`), rounded up to 32 pixels.
+    // Pixels outside it are not touched (Vulkan keeps them), so this is exact. The same pass last
+    // frame (same attachments, n-th such pass in the frame) predicts its area; if a later draw
+    // needs more, the pass ends and restarts bigger (its content is stored and loaded again).
+    // PES_PASS_FULL=1: whole image every time (A/B).
+    // overwritesColor / overwritesDepth: the first draw writes every pixel of `need` (a clear rectangle,
+    // see DrawImpl). A new pass that covers exactly that area then skips loading the old content
+    // (DONT_CARE) - on the tile-based iPad GPU that load is memory traffic for the whole area.
+    // PES_NO_DISCARD_LOADS=1 / PES_CONTROL "discardloads off": always load (A/B).
+    void BeginPass(RenderTarget* color, RenderTarget* depth, const VkRect2D* need = nullptr, bool overwritesColor = false, bool overwritesDepth = false)
     {
-        if (g_inPass && g_passColor == color && g_passDepth == depth) return;
-        EndPass("target change");
+        const bool fullPasses = g_fullPasses;
+        const VkExtent2D full = PassExtent(color, depth);
+        uint32_t nx = full.width, ny = full.height;
+        if (need && !fullPasses)
+        {
+            nx = std::min<uint32_t>(full.width, uint32_t(std::max<int32_t>(need->offset.x + int32_t(need->extent.width), 1)));
+            ny = std::min<uint32_t>(full.height, uint32_t(std::max<int32_t>(need->offset.y + int32_t(need->extent.height), 1)));
+        }
+        uint32_t slot;
+        VkExtent2D needed{ nx, ny }; // what the draws need (the history records this, not the prediction)
+        bool exact = false; // framebuffer = exactly `need` (no rounding), old content not loaded
+        if (g_inPass && g_passColor == color && g_passDepth == depth)
+        {
+            g_passNeed = { std::max(g_passNeed.width, nx), std::max(g_passNeed.height, ny) };
+            if (nx <= g_passExtent.width && ny <= g_passExtent.height) return;
+            needed = g_passNeed;
+            nx = std::max(nx, g_passExtent.width);
+            ny = std::max(ny, g_passExtent.height);
+            slot = g_passSlot; // the same pass, grown (history keeps the larger area)
+            EndPass("pass grows");
+        }
+        else
+        {
+            EndPass("target change");
+            if (g_passSlotFrame != g_frame) { g_passSlots.clear(); g_passSlotFrame = g_frame; }
+            slot = g_passSlots[{ color, depth }]++;
+            const auto h = g_passAreaHistory.find({ color, depth, slot });
+            if (h != g_passAreaHistory.end() && !fullPasses)
+            {
+                nx = std::max(nx, h->second.extent.width);
+                ny = std::max(ny, h->second.extent.height);
+            }
+            exact = (overwritesColor || overwritesDepth) && need && !fullPasses && !g_noDiscardLoads &&
+                need->offset.x == 0 && need->offset.y == 0 && nx == needed.width && ny == needed.height;
+        }
+        auto roundUp = [](uint32_t v, uint32_t limit) { return std::min(limit, (v + 31) & ~31u); };
+        const VkExtent2D extent = exact ? needed : VkExtent2D{ roundUp(nx, full.width), roundUp(ny, full.height) };
+        if (exact) g_discardedLoadPixels += uint64_t(extent.width) * extent.height * ((overwritesColor && color) + (overwritesDepth && depth));
         if (color) Transition(color->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (depth) Transition(depth->img, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        const VkRenderPass pass = RenderPassFor(color ? color->format : VK_FORMAT_UNDEFINED, depth ? depth->format : VK_FORMAT_UNDEFINED);
-        const VkExtent2D extent = PassExtent(color, depth);
-        VkFramebuffer& fb = g_framebuffers[{ color, depth }];
+        const VkRenderPass pass = RenderPassFor(color ? color->format : VK_FORMAT_UNDEFINED, depth ? depth->format : VK_FORMAT_UNDEFINED,
+            !(exact && overwritesColor), !(exact && overwritesDepth));
+        g_passSlot = slot;
+        VkFramebuffer& fb = g_framebuffers[{ color, depth, extent.width, extent.height }];
         if (!fb)
         {
             VkImageView views[2];
@@ -1360,6 +1509,7 @@ namespace
         bi.renderPass = pass;
         bi.framebuffer = fb;
         bi.renderArea = { { 0, 0 }, extent };
+        MarkGpu(3); // work since the previous mark (layout transitions etc.)
         vkCmdBeginRenderPass(g_cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
         g_inPass = true;
         g_passColor = color;
@@ -1367,6 +1517,7 @@ namespace
         ++g_passBegins;
         g_passDraws = 0;
         g_passExtent = extent;
+        g_passNeed = needed;
         g_passX0 = g_passY0 = INT32_MAX;
         g_passX1 = g_passY1 = 0;
     }
@@ -1384,6 +1535,12 @@ namespace
         uint64_t lastResolveFrame = 0; // frame of the last resolve into it (one-off vs per-frame resolves)
         uint64_t retiredFrame = 0;     // first eviction sweep that saw it retired (base 0xFFFFFFFF)
         uint64_t lastSampledFrame = 0; // last frame a texture fetch used it (stats / eviction)
+        uint64_t sampledGen = 0;       // generation a texture fetch last used (see SkipUnsampledResolve)
+        uint32_t unsampledResolves = 0; // resolves in a row whose result nothing sampled
+        bool skippedContent = false;   // the last resolve's copy was skipped: the image is stale
+        // Skipped resolves, replayed if the surface is sampled while their source is unchanged.
+        struct PendingResolve { RenderTarget* rt; uint64_t serial; int32_t sx, sy, dx, dy; uint32_t w, h; };
+        std::vector<PendingResolve> pendingResolves;
         bool mirror = false;           // this frame's resolves into it are stored to guest memory
         Image img;
         // Copies of the top-left fetch-sized region (see SurfaceForFetchSize), by width << 16 | height.
@@ -1468,6 +1625,72 @@ namespace
             if (at + kSnapshotBytes > kSharedMemorySize) break;
             std::memcpy(s->snapshot.data() + i * kSnapshotBytes, g_xeMemory.TranslatePhysical(at), kSnapshotBytes);
         }
+    }
+    // Resolves whose result is never sampled (PES resolves shadow-map color, depth of passes it
+    // never reads, ...: about half of the resolved pixels in heavy scenes). Each skipped copy also
+    // keeps the render pass open (no store + reload on the tile-based iPad GPU). A surface is
+    // skipped after kSkipAfter resolves in a row that nothing sampled; small ones never (the CPU
+    // reads kits / numbers from guest memory). Call before SnapshotSurface. If a skipped surface is
+    // sampled after all, copies resume at once (MarkSurfaceSampled; at most that one use is stale).
+    // PES_NO_RESOLVE_SKIP=1: always copy (A/B).
+    bool g_noResolveSkip = std::getenv("PES_NO_RESOLVE_SKIP") != nullptr; // PES_CONTROL "resolveskip on/off"
+    struct ResolveSkipStats { uint64_t resolves = 0, skipped = 0, skippedPixels = 0, staleSamples = 0, replayed = 0, lost = 0; } g_resolveSkip;
+    void CopyColorResolve(RenderTarget* rt, Surface* s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, uint32_t w, uint32_t h);
+    bool CopyDepthResolve(RenderTarget* d, Surface* s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, uint32_t w, uint32_t h);
+    // Record a skipped copy (same destination rectangle: the newer one replaces it).
+    void DeferResolve(Surface* s, RenderTarget* rt, int32_t sx, int32_t sy, int32_t dx, int32_t dy, uint32_t w, uint32_t h)
+    {
+        auto& v = s->pendingResolves;
+        std::erase_if(v, [&](const Surface::PendingResolve& p) { return p.dx == dx && p.dy == dy && p.w == w && p.h == h; });
+        if (v.size() >= 16) v.erase(v.begin());
+        v.push_back({ rt, rt->writeSerial, sx, sy, dx, dy, w, h });
+    }
+    bool SkipUnsampledResolve(Surface* s, uint32_t w, uint32_t h)
+    {
+        const bool off = g_noResolveSkip;
+        constexpr uint32_t kSkipAfter = 120;
+        ++g_resolveSkip.resolves;
+        if (s->generation && s->sampledGen != s->generation) ++s->unsampledResolves;
+        else s->unsampledResolves = 0;
+        const bool skip = !off && s->unsampledResolves >= kSkipAfter && (s->pitch > 256 || s->height > 256);
+        s->skippedContent = skip;
+        if (skip)
+        {
+            ++g_resolveSkip.skipped;
+            g_resolveSkip.skippedPixels += uint64_t(w) * h;
+        }
+        return skip;
+    }
+    void MarkSurfaceSampled(Surface* s)
+    {
+        s->lastSampledFrame = g_frame;
+        if (s->skippedContent)
+        {
+            // Replay the skipped copies whose source is still unchanged (oldest first).
+            uint32_t replayed = 0, lost = 0;
+            for (const auto& p : s->pendingResolves)
+            {
+                const bool alive = std::any_of(g_rts.begin(), g_rts.end(), [&](const auto& kv) { return kv.second.get() == p.rt; });
+                if (!alive || p.rt->writeSerial != p.serial) { ++lost; continue; }
+                if (s->isDepth ? CopyDepthResolve(p.rt, s, p.sx, p.sy, p.dx, p.dy, p.w, p.h)
+                               : (CopyColorResolve(p.rt, s, p.sx, p.sy, p.dx, p.dy, p.w, p.h), true))
+                    ++replayed;
+                else
+                    ++lost;
+            }
+            s->pendingResolves.clear();
+            if (replayed) s->generation = ++g_surfaceGeneration; // crops / composed textures refresh
+            g_resolveSkip.replayed += replayed;
+            g_resolveSkip.lost += lost;
+            if (lost) ++g_resolveSkip.staleSamples;
+            static uint32_t logs = 0;
+            if (logs++ < 20)
+                std::printf("[render] skipped resolve surface 0x%08X %ux%u sampled after %u unsampled resolves: %u copies replayed, %u lost (stale) - copying again\n",
+                    s->base, s->pitch, s->height, s->unsampledResolves, replayed, lost);
+            s->skippedContent = false;
+            s->unsampledResolves = 0;
+        }
+        s->sampledGen = s->generation;
     }
     bool SurfaceStillInMemory(Surface* s)
     {
@@ -1938,8 +2161,9 @@ namespace
             RenderTarget* rt = it->second.get();
             if (!stale(rt->lastUsedFrame) || owned.count(rt) || rt == g_passColor || rt == g_passDepth) { ++it; continue; }
             for (auto fb = g_framebuffers.begin(); fb != g_framebuffers.end();)
-                if (fb->first.first == rt || fb->first.second == rt) { vkDestroyFramebuffer(g_dev, fb->second, nullptr); fb = g_framebuffers.erase(fb); }
+                if (std::get<0>(fb->first) == rt || std::get<1>(fb->first) == rt) { vkDestroyFramebuffer(g_dev, fb->second, nullptr); fb = g_framebuffers.erase(fb); }
                 else ++fb;
+            std::erase_if(g_passAreaHistory, [&](const auto& kv) { return std::get<0>(kv.first) == rt || std::get<1>(kv.first) == rt; });
             if (rt->depthView) vkDestroyImageView(g_dev, rt->depthView, nullptr);
             if (rt->stencilView) vkDestroyImageView(g_dev, rt->stencilView, nullptr);
             DestroyImage(rt->img);
@@ -2018,7 +2242,7 @@ namespace
 
         uint64_t words[2 * 64];
         uint32_t n = 0;
-        for (Surface* s : parts) s->lastSampledFrame = g_frame;
+        for (Surface* s : parts) MarkSurfaceSampled(s);
         for (Surface* s : parts)
             if (n + 2 <= std::size(words)) { words[n++] = uint64_t(reinterpret_cast<uintptr_t>(s)); words[n++] = s->generation; }
         const uint64_t signature = XXH3_64bits(words, n * 8);
@@ -2138,7 +2362,7 @@ namespace
         }
         if (Surface* s = memoryExact ? nullptr : FindSurfaceForTexture(base, fetch))
         {
-            s->lastSampledFrame = g_frame;
+            MarkSurfaceSampled(s);
             // A resolve with copy_dest_swap exchanged red and blue in memory: guest channel 0 is the image's blue.
             const uint32_t swz = CombineSwizzle(fetch.swizzle, s->rbSwapped ? kSwapRBSwizzle : kIdentitySwizzle);
             // Surfaces are sized to the tiled layout (720 -> 736 rows, 360 -> 384): a smaller fetch
@@ -2866,8 +3090,10 @@ namespace
             ? xenos::Float20e4To32(v >> 8) : xenos::UNorm24To32(v >> 8);
         clear.clearValue.depthStencil.stencil = v & 0xFF;
         const VkClearRect clearRect{ rect, 0, 1 };
-        BeginPass(nullptr, depth);
+        BeginPass(nullptr, depth, &rect);
+        ++depth->writeSerial;
         vkCmdClearAttachments(g_cmd, 1, &clear, 1, &clearRect);
+        MarkTilesCleared(depth, rect, clear.clearValue);
     }
 
     // Depth copy (resolve of the depth buffer to a k_24_8 / k_24_8_FLOAT texture, e.g. shadow maps).
@@ -2876,6 +3102,42 @@ namespace
     // buffer.
     Buffer g_depthCopyBuf;
     int g_abPhase = 0; // 0 off, 1 frame A, 2 frame B, 3 done
+
+    // Depth -> R32_SFLOAT surface: through a buffer (depth/stencil images cannot be copied to color images).
+    bool CopyDepthResolve(RenderTarget* d, Surface* s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, uint32_t w, uint32_t h)
+    {
+        const VkDeviceSize bytes = VkDeviceSize(w) * h * 4;
+        if (g_depthCopyBuf.size < bytes)
+        {
+            if (g_depthCopyBuf.buffer) WarnOnce("depth copy larger than the staging buffer");
+            if (!g_depthCopyBuf.buffer && !CreateDeviceBuffer(g_depthCopyBuf, 2048ull * 2048 * 4,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                return false;
+            if (g_depthCopyBuf.size < bytes) return false;
+        }
+        Transition(d->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        // The buffer may still be read by the previous depth copy.
+        VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+        bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.buffer = g_depthCopyBuf.buffer;
+        bb.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
+        VkBufferImageCopy c{};
+        c.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+        c.imageOffset = { sx, sy, 0 };
+        c.imageExtent = { w, h, 1 };
+        vkCmdCopyImageToBuffer(g_cmd, d->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_depthCopyBuf.buffer, 1, &c);
+        bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
+        c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        c.imageOffset = { dx, dy, 0 };
+        vkCmdCopyBufferToImage(g_cmd, g_depthCopyBuf.buffer, s->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+        return true;
+    }
 
     void ResolveDepth(const draw_util::ResolveInfo& info)
     {
@@ -2896,50 +3158,30 @@ namespace
         if (!s) return;
         s->rbSwapped = false;
         s->isDepth = true;
+        const bool skipCopy = SkipUnsampledResolve(s, src.extent.width, src.extent.height);
         SnapshotSurface(s);
         int32_t dstX, dstY;
         ResolveDestOffset(s, info.copy_dest_base, info, dstX, dstY);
         if (dstX < 0 || dstY < 0 || uint32_t(dstX) >= s->img.width || uint32_t(dstY) >= s->img.height) return;
         const uint32_t w = std::min<uint32_t>(src.extent.width, s->img.width - dstX);
         const uint32_t h = std::min<uint32_t>(src.extent.height, s->img.height - dstY);
-        const VkDeviceSize bytes = VkDeviceSize(w) * h * 4;
-        if (g_depthCopyBuf.size < bytes)
+        if (skipCopy)
         {
-            if (g_depthCopyBuf.buffer) WarnOnce("depth copy larger than the staging buffer");
-            if (!g_depthCopyBuf.buffer && !CreateDeviceBuffer(g_depthCopyBuf, 2048ull * 2048 * 4,
-                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-                return;
-            if (g_depthCopyBuf.size < bytes) return;
+            DeferResolve(s, d, src.offset.x, src.offset.y, dstX, dstY, w, h);
+            CaptureStep(nullptr, "DEPTH RESOLVE (skipped: never sampled) -> 0x%08X (surface 0x%08X)", info.copy_dest_base, s->base);
+            return;
         }
-        Transition(d->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        Transition(s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        // The buffer may still be read by the previous depth copy.
-        VkBufferMemoryBarrier bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-        bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bb.buffer = g_depthCopyBuf.buffer;
-        bb.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
-        VkBufferImageCopy c{};
-        c.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
-        c.imageOffset = { src.offset.x, src.offset.y, 0 };
-        c.imageExtent = { w, h, 1 };
-        vkCmdCopyImageToBuffer(g_cmd, d->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_depthCopyBuf.buffer, 1, &c);
-        bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
-        c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        c.imageOffset = { dstX, dstY, 0 };
+        s->pendingResolves.clear();
         if (g_abPhase == 2)
         {
             // A/B frame B: depth textures read 0 (as before depth copies existed).
+            Transition(s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkClearColorValue zero{};
             const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdClearColorImage(g_cmd, s->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
         }
-        else
-            vkCmdCopyBufferToImage(g_cmd, g_depthCopyBuf.buffer, s->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+        else if (!CopyDepthResolve(d, s, src.offset.x, src.offset.y, dstX, dstY, w, h))
+            return;
         static uint32_t logs = 0;
         if (logs++ < 6)
             std::printf("[render] depth copy: depth base %u pitch %u msaa %u rect %d,%d %ux%u -> 0x%08X (surface 0x%08X) at %d,%d, dest fmt %u\n",
@@ -3034,6 +3276,20 @@ namespace
         }
     }
 
+    void CopyColorResolve(RenderTarget* rt, Surface* s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, uint32_t w, uint32_t h)
+    {
+        Transition(rt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageCopy copy{};
+        copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.srcOffset = { sx, sy, 0 };
+        copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.dstOffset = { dx, dy, 0 };
+        copy.extent = { w, h, 1 };
+        vkCmdCopyImage(g_cmd, rt->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s->img.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    }
+
     void Resolve()
     {
         PassEndContext passEndContext("resolve");
@@ -3107,6 +3363,7 @@ namespace
         height = std::min<uint32_t>(height, std::min<int32_t>(s->img.height - dstY, kRtHeight - srcY));
 
         s->rbSwapped = info.copy_dest_info.copy_dest_swap != 0;
+        const bool skipCopy = SkipUnsampledResolve(s, width, height);
         SnapshotSurface(s);
         if (g_capArmed && g_capState == CaptureState::Active && destBase >= g_capArmMin && s->pitch == g_capArmW && s->height == g_capArmH)
         {
@@ -3130,18 +3387,12 @@ namespace
             std::printf("[small-resolve] f%llu -> 0x%08X (surface 0x%08X %ux%u) at %d,%d from rt %u fmt %d pitch %u msaa %u src %d,%d %ux%u%s\n",
                 (unsigned long long)g_frame, destBase, s->base, s->pitch, s->height, dstX, dstY, rt->base, int(rt->format), rt->pitchTiles,
                 uint32_t(rt->msaa), srcX, srcY, width, height, info.IsClearingColor() ? " +clear" : "");
-        if (width && height && dstX >= 0 && dstY >= 0)
+        if (skipCopy && width && height && dstX >= 0 && dstY >= 0)
+            DeferResolve(s, rt, srcX, srcY, dstX, dstY, width, height); // before the clear below changes the target
+        if (width && height && dstX >= 0 && dstY >= 0 && !skipCopy)
         {
-            Transition(rt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            Transition(s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            VkImageCopy copy{};
-            copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            copy.srcOffset = { srcX, srcY, 0 };
-            copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            copy.dstOffset = { dstX, dstY, 0 };
-            copy.extent = { width, height, 1 };
-            vkCmdCopyImage(g_cmd, rt->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s->img.image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            s->pendingResolves.clear();
+            CopyColorResolve(rt, s, srcX, srcY, dstX, dstY, width, height);
             // On the console a resolve writes guest memory, and the game relies on that: PES copies
             // resolved player kits into their final textures on the CPU (one team's kits were
             // missing - flat silhouettes - until resolves were mirrored to memory, 2026-11-07).
@@ -3194,8 +3445,10 @@ namespace
             rect.layerCount = 1;
             if (rect.rect.extent.width && rect.rect.extent.height)
             {
-                BeginPass(rt, nullptr);
+                BeginPass(rt, nullptr, &rect.rect);
+                ++rt->writeSerial;
                 vkCmdClearAttachments(g_cmd, 1, &clear, 1, &rect);
+                MarkTilesCleared(rt, rect.rect, clear.clearValue);
             }
         }
         if (info.IsClearingDepth())
@@ -3347,6 +3600,9 @@ namespace
         std::vector<FetchOverride> rectFetchOverrides;
         const bool rectList = init.prim_type == xenos::PrimitiveType::kRectangleList;
         VkRect2D rectBounds{};        // single rectangle: covered pixels (from the CPU-run vertex shader)
+        float rectInterp[16][4] = {}; // single rectangle: interpolator outputs, if equal at all corners (rectInterpMask)
+        uint32_t rectInterpMask = 0;
+        float rectDepth = 0.0f; bool rectDepthConst = false; // single rectangle: window depth, equal at all corners
         bool rectBoundsValid = false;
         if (convert)
         {
@@ -3392,8 +3648,16 @@ namespace
                     {
                         float pos[4] = {};
                         bool has = false;
+                        float interp[16][4] = {};
+                        uint32_t interpMask = 0; // bit i: interpolator i fully written
                         void Export(ucode::ExportRegister reg, const float* value, uint32_t mask) override
                         {
+                            if (uint32_t(reg) < 16)
+                            {
+                                for (int i = 0; i < 4; ++i) if (mask & (1u << i)) interp[uint32_t(reg)][i] = value[i];
+                                if (mask == 0xF) interpMask |= 1u << uint32_t(reg);
+                                return;
+                            }
                             if (reg != ucode::ExportRegister::kVSPosition) return;
                             for (int i = 0; i < 4; ++i) if (mask & (1u << i)) pos[i] = value[i];
                             has = true;
@@ -3412,9 +3676,15 @@ namespace
                         for (uint32_t k = 0; k < 3; ++k)
                         {
                             sink.has = false;
+                            sink.interpMask = 0;
                             interpreter.temp_registers()[0] = float((uint32_t(int32_t(idx(r * 3 + k)) + baseIndex)) & 0xFFFFFF);
                             interpreter.Execute();
                             if (!sink.has) { cornersFound = false; break; }
+                            if (rects == 1)
+                            {
+                                if (k == 0) { std::memcpy(rectInterp, sink.interp, sizeof(rectInterp)); rectInterpMask = sink.interpMask; }
+                                else if (sink.interpMask != rectInterpMask || std::memcmp(rectInterp, sink.interp, sizeof(rectInterp)) != 0) rectInterpMask = 0;
+                            }
                             float x = sink.pos[0], y = sink.pos[1];
                             if (!vte.vtx_xy_fmt && sink.pos[3] != 0.0f) { x /= sink.pos[3]; y /= sink.pos[3]; }
                             p[k][0] = x * sx;
@@ -3430,6 +3700,16 @@ namespace
                         // .5 after the D3D -0.5 offset): lets clears skip copying old tile content.
                         if (rects == 1)
                         {
+                            // Window depth if the same at all corners (clear rectangles: see knownDepthClear in the draw).
+                            if (pz[0] == pz[1] && pz[1] == pz[2] && pw[0] == pw[1] && pw[1] == pw[2])
+                            {
+                                float zw = pz[0];
+                                if (!vte.vtx_z_fmt && pw[0] != 0.0f) zw /= pw[0];
+                                if (vte.vport_z_scale_ena) zw *= g_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE);
+                                if (vte.vport_z_offset_ena) zw += g_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET);
+                                rectDepth = zw;
+                                rectDepthConst = true;
+                            }
                             const float ox = vte.vport_x_offset_ena ? g_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f;
                             const float oy = vte.vport_y_offset_ena ? g_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f;
                             float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
@@ -3756,6 +4036,8 @@ namespace
         rect.extent.height = std::min<uint32_t>(rect.extent.height, kRtHeight - std::min<uint32_t>(scissor.offset[1], kRtHeight));
         if (debugForceState)
             rect = { { 0, 0 }, { kRtWidth, kRtHeight } };
+        bool colorOverwrites = false, depthOverwrites = false; // this draw writes every pixel of rectBounds (no load needed)
+        std::vector<TileFill> colorFills, depthFills; // cleared tiles claimed from other targets: cleared in the pass (AcquireTiles)
         // Bring in the current content of the EDRAM tiles this draw touches (before the pass):
         // scissor and viewport (the scissor alone is often the whole surface).
         {
@@ -3819,10 +4101,12 @@ namespace
                         !(ps && ps->shader->kills_pixels()))
                         depthNoCopy = &rectBounds;
                 }
+                colorOverwrites = colorNoCopy != nullptr;
+                depthOverwrites = depthNoCopy != nullptr;
                 CaptureNote("      claim: color %s %d,%d-%d,%d (tile %ux%u)%s | depth %s %d,%d-%d,%d%s", colorMask ? "yes" : "no", x0, y0, x1, cy1,
                     rt->tileW, rt->tileH, colorNoCopy ? " noCopy" : "", depthRt ? "yes" : "no", x0, y0, x1, dy1, depthNoCopy ? " noCopy" : "");
-                if (colorMask && cy1 > y0) AcquireTiles(rt, x0, y0, uint32_t(x1 - x0), uint32_t(cy1 - y0), colorNoCopy);
-                if (depthRt && dy1 > y0) AcquireTiles(depthRt, x0, y0, uint32_t(x1 - x0), uint32_t(dy1 - y0), depthNoCopy);
+                if (colorMask && cy1 > y0) AcquireTiles(rt, x0, y0, uint32_t(x1 - x0), uint32_t(cy1 - y0), colorNoCopy, &colorFills, true);
+                if (depthRt && dy1 > y0) AcquireTiles(depthRt, x0, y0, uint32_t(x1 - x0), uint32_t(dy1 - y0), depthNoCopy, &depthFills, true);
             }
             static const double logFrom = [] { const char* e = std::getenv("PES_LOG_TILES"); return e ? std::atof(e) : -1.0; }();
             static const auto logStart = std::chrono::steady_clock::now();
@@ -3837,7 +4121,176 @@ namespace
             }
         }
         CaptureProbeNow(colorMask ? rt : nullptr, nullptr, true); // texel this draw blends onto (probe)
-        BeginPass(rt, depthRt);
+        // The draw's area for the pass (BeginPass): scissor and viewport - rasterization is clipped to
+        // the viewport - plus a margin for wide lines. The scissor is narrowed to it, so the draw
+        // cannot reach outside the pass area.
+        {
+            constexpr int32_t kMargin = 8;
+            const int32_t vx0 = int32_t(vi.xy_offset[0]) - kMargin, vy0 = int32_t(vi.xy_offset[1]) - kMargin;
+            const int32_t vx1 = int32_t(vi.xy_offset[0] + vi.xy_extent[0]) + kMargin, vy1 = int32_t(vi.xy_offset[1] + vi.xy_extent[1]) + kMargin;
+            const int32_t ax0 = std::max(rect.offset.x, vx0), ay0 = std::max(rect.offset.y, vy0);
+            const int32_t ax1 = std::min(rect.offset.x + int32_t(rect.extent.width), vx1);
+            const int32_t ay1 = std::min(rect.offset.y + int32_t(rect.extent.height), vy1);
+            if (ax1 > ax0 && ay1 > ay0)
+                rect = { { ax0, ay0 }, { uint32_t(ax1 - ax0), uint32_t(ay1 - ay0) } };
+            else
+                rect.extent = { 0, 0 };
+        }
+        // A clear (a single rectangle that writes every pixel it covers, see the tile claim above)
+        // starting at the origin: its area is exactly the rectangle (inside scissor and viewport),
+        // and a new pass of that size need not load the old content (BeginPass).
+        bool discardColor = false, discardDepth = false;
+        if (rectBoundsValid && (colorOverwrites || depthOverwrites))
+        {
+            const auto colorCtl = g_regs.Get<reg::RB_COLORCONTROL>();
+            const bool noAlphaTest = !colorCtl.alpha_test_enable && !colorCtl.alpha_to_mask_enable;
+            // Color is only fully written if depth / stencil tests cannot reject pixels.
+            const bool testsPass = !depthRt ||
+                ((!depthControl.z_enable || depthControl.zfunc == xenos::CompareFunction::kAlways) &&
+                 (!depthControl.stencil_enable || (depthControl.stencilfunc == xenos::CompareFunction::kAlways &&
+                     (!depthControl.backface_enable || depthControl.stencilfunc_bf == xenos::CompareFunction::kAlways))));
+            const int32_t vx1 = int32_t(vi.xy_offset[0] + vi.xy_extent[0]), vy1 = int32_t(vi.xy_offset[1] + vi.xy_extent[1]);
+            const int32_t ex1 = std::min({ rectBounds.offset.x + int32_t(rectBounds.extent.width), rect.offset.x + int32_t(rect.extent.width), vx1 });
+            const int32_t ey1 = std::min({ rectBounds.offset.y + int32_t(rectBounds.extent.height), rect.offset.y + int32_t(rect.extent.height), vy1 });
+            if (rectBounds.offset.x <= 0 && rectBounds.offset.y <= 0 && rect.offset.x == 0 && rect.offset.y == 0 &&
+                int32_t(vi.xy_offset[0]) <= 0 && int32_t(vi.xy_offset[1]) <= 0 && ex1 > 0 && ey1 > 0 && noAlphaTest)
+            {
+                rect = { { 0, 0 }, { uint32_t(ex1), uint32_t(ey1) } };
+                discardColor = colorOverwrites && testsPass;
+                discardDepth = depthOverwrites && depthRt;
+            }
+        }
+        // Tiles filled from clears (AcquireTiles) must be inside the pass area; the scissor stays `rect`.
+        VkRect2D passNeed = rect;
+        if (!colorFills.empty() || !depthFills.empty())
+        {
+            int32_t nx1 = rect.offset.x + int32_t(rect.extent.width), ny1 = rect.offset.y + int32_t(rect.extent.height);
+            for (const auto* v : { &colorFills, &depthFills })
+                for (const TileFill& t : *v)
+                {
+                    nx1 = std::max(nx1, t.rect.offset.x + int32_t(t.rect.extent.width));
+                    ny1 = std::max(ny1, t.rect.offset.y + int32_t(t.rect.extent.height));
+                }
+            passNeed = { { 0, 0 }, { uint32_t(nx1), uint32_t(ny1) } };
+            discardColor = discardDepth = false;
+        }
+        // A clear draw whose pixel shader outputs a constant (run twice on the CPU with different
+        // inputs) on a plain 8888 target: the cleared tiles remember the value (g_tileClear).
+        bool knownClear = false;
+        VkClearValue clearValue{};
+        VkRect2D clearArea{};
+        if (colorOverwrites && rectBoundsValid && !g_noClearFill && ps && rt->format == VK_FORMAT_R8G8B8A8_UNORM &&
+            ShaderInterpreter::CanInterpretShader(*ps->shader))
+        {
+            const auto ci = g_regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[0]);
+            const bool testsPass = !depthRt ||
+                ((!depthControl.z_enable || depthControl.zfunc == xenos::CompareFunction::kAlways) &&
+                 (!depthControl.stencil_enable || (depthControl.stencilfunc == xenos::CompareFunction::kAlways &&
+                     (!depthControl.backface_enable || depthControl.stencilfunc_bf == xenos::CompareFunction::kAlways))));
+            ++g_clearDraws;
+            if (ci.color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 && ci.color_exp_bias == 0 && testsPass)
+            {
+                struct ColorSink : ShaderInterpreter::ExportSink
+                {
+                    float color[4] = {};
+                    uint32_t mask = 0;
+                    void Export(ucode::ExportRegister reg, const float* value, uint32_t m) override
+                    {
+                        if (reg != ucode::ExportRegister::kPSColor0) return;
+                        for (int i = 0; i < 4; ++i) if (m & (1u << i)) color[i] = value[i];
+                        mask |= m;
+                    }
+                };
+                static ShaderInterpreter psInterpreter(g_regs, g_xeMemory);
+                ColorSink a, b;
+                psInterpreter.SetShader(*ps->shader);
+                for (int run = 0; run < 2; ++run)
+                {
+                    float* t = psInterpreter.temp_registers();
+                    for (int i = 0; i < int(xenos::kMaxShaderTempRegisters) * 4; ++i) t[i] = run ? 0.37f + float(i) * 0.011f : -1.9f - float(i) * 0.013f; // inputs (interpolators)
+                    for (uint32_t r = 0; r < 16; ++r) // interpolators the vertex shader wrote, equal at all corners
+                        if (rectInterpMask & (1u << r)) std::memcpy(t + r * 4, rectInterp[r], sizeof(rectInterp[r]));
+                    psInterpreter.SetExportSink(run ? &b : &a);
+                    psInterpreter.Execute();
+                }
+                psInterpreter.SetExportSink(nullptr);
+                const bool finite = std::all_of(std::begin(a.color), std::end(a.color), [](float v) { return std::isfinite(v); });
+                if (a.mask == 0xF && b.mask == 0xF && finite && std::equal(std::begin(a.color), std::end(a.color), std::begin(b.color)))
+                {
+                    const int32_t vx1 = int32_t(vi.xy_offset[0] + vi.xy_extent[0]), vy1 = int32_t(vi.xy_offset[1] + vi.xy_extent[1]);
+                    const int32_t cx0 = std::max({ rectBounds.offset.x, rect.offset.x, int32_t(vi.xy_offset[0]) });
+                    const int32_t cy0 = std::max({ rectBounds.offset.y, rect.offset.y, int32_t(vi.xy_offset[1]) });
+                    const int32_t cx1 = std::min({ rectBounds.offset.x + int32_t(rectBounds.extent.width), rect.offset.x + int32_t(rect.extent.width), vx1 });
+                    const int32_t cy1 = std::min({ rectBounds.offset.y + int32_t(rectBounds.extent.height), rect.offset.y + int32_t(rect.extent.height), vy1 });
+                    if (cx1 > cx0 && cy1 > cy0 && cx0 >= 0 && cy0 >= 0)
+                    {
+                        for (int i = 0; i < 4; ++i) clearValue.color.float32[i] = std::clamp(a.color[i], 0.0f, 1.0f);
+                        clearArea = { { cx0, cy0 }, { uint32_t(cx1 - cx0), uint32_t(cy1 - cy0) } };
+                        knownClear = true;
+                        ++g_clearDrawsKnown;
+                    }
+                }
+            }
+        }
+        // A depth clear rectangle (writes depth and stencil everywhere it covers, see depthNoCopy):
+        // its tiles remember the value only when it is exact in any format and conversion - window
+        // depth exactly 0 or 1 (equal at all corners, viewport depth range 0..1, no shader depth
+        // export) - and the stencil reference is the same for both faces.
+        bool knownDepthClear = false;
+        VkClearValue depthClearValue{};
+        VkRect2D depthClearArea{};
+        if (depthOverwrites && depthRt && rectBoundsValid && rectDepthConst && !g_noClearFill &&
+            (rectDepth == 0.0f || rectDepth == 1.0f) && vi.z_min == 0.0f && vi.z_max == 1.0f && !(ps && ps->shader->writes_depth()) &&
+            !g_regs.Get<reg::RB_COLORCONTROL>().alpha_test_enable && !g_regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable)
+        {
+            const uint32_t front = g_regs[XE_GPU_REG_RB_STENCILREFMASK], back = g_regs[XE_GPU_REG_RB_STENCILREFMASK_BF];
+            if (!depthControl.backface_enable || (front & 0xFF) == (back & 0xFF))
+            {
+                const int32_t vx1 = int32_t(vi.xy_offset[0] + vi.xy_extent[0]), vy1 = int32_t(vi.xy_offset[1] + vi.xy_extent[1]);
+                const int32_t cx0 = std::max({ rectBounds.offset.x, rect.offset.x, int32_t(vi.xy_offset[0]) });
+                const int32_t cy0 = std::max({ rectBounds.offset.y, rect.offset.y, int32_t(vi.xy_offset[1]) });
+                const int32_t cx1 = std::min({ rectBounds.offset.x + int32_t(rectBounds.extent.width), rect.offset.x + int32_t(rect.extent.width), vx1 });
+                const int32_t cy1 = std::min({ rectBounds.offset.y + int32_t(rectBounds.extent.height), rect.offset.y + int32_t(rect.extent.height), vy1 });
+                if (cx1 > cx0 && cy1 > cy0 && cx0 >= 0 && cy0 >= 0)
+                {
+                    depthClearValue.depthStencil = { rectDepth, front & 0xFF };
+                    depthClearArea = { { cx0, cy0 }, { uint32_t(cx1 - cx0), uint32_t(cy1 - cy0) } };
+                    knownDepthClear = true;
+                    ++g_depthClearDrawsKnown;
+                }
+            }
+        }
+        BeginPass(rt, depthRt, &passNeed, discardColor, discardDepth);
+        if (!colorFills.empty() || !depthFills.empty())
+        {
+            // Thousands of tiles per frame: tiles next to each other in a row with the same value
+            // become one rectangle (AcquireTiles lists them row by row), and each value is one call.
+            for (const auto* v : { &colorFills, &depthFills })
+            {
+                std::vector<std::pair<VkClearValue, std::vector<VkClearRect>>> groups;
+                for (const TileFill& t : *v)
+                {
+                    auto g = std::find_if(groups.begin(), groups.end(), [&](const auto& x) { return !std::memcmp(&x.first, &t.value, sizeof(VkClearValue)); });
+                    if (g == groups.end()) { groups.push_back({ t.value, {} }); g = groups.end() - 1; }
+                    VkClearRect* last = g->second.empty() ? nullptr : &g->second.back();
+                    if (last && last->rect.offset.y == t.rect.offset.y && last->rect.extent.height == t.rect.extent.height &&
+                        last->rect.offset.x + int32_t(last->rect.extent.width) == t.rect.offset.x)
+                        last->rect.extent.width += t.rect.extent.width;
+                    else
+                        g->second.push_back({ t.rect, 0, 1 });
+                }
+                for (const auto& [value, rects] : groups)
+                {
+                    VkClearAttachment att{};
+                    att.aspectMask = v == &colorFills ? VK_IMAGE_ASPECT_COLOR_BIT : (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+                    att.colorAttachment = 0;
+                    att.clearValue = value;
+                    vkCmdClearAttachments(g_cmd, 1, &att, uint32_t(rects.size()), rects.data());
+                }
+            }
+            if (!colorFills.empty()) ++rt->writeSerial;
+            if (!depthFills.empty() && depthRt) ++depthRt->writeSerial;
+        }
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         // Stencil reference/masks: RB_STENCILREFMASK(_BF) = ref 0:7, compare mask 8:15, write mask 16:23.
         {
@@ -3868,9 +4321,15 @@ namespace
         }
         else
             vkCmdDraw(g_cmd, count, 1, 0, 0);
+        g_markShader = ps ? ps->shader->ucode_data_hash() : 1; // 1: no pixel shader
         MarkGpu(0);
+        if (knownClear) MarkTilesCleared(rt, clearArea, clearValue); // after AcquireTiles forgot the old values
+        if (knownDepthClear) MarkTilesCleared(depthRt, depthClearArea, depthClearValue);
+        g_markShader = 0;
         ++g_stats.issued;
         ++g_passDraws;
+        if (g_passColor) ++g_passColor->writeSerial;
+        if (g_passDepth) ++g_passDepth->writeSerial;
         g_passX0 = std::min(g_passX0, rect.offset.x);
         g_passY0 = std::min(g_passY0, rect.offset.y);
         g_passX1 = std::max(g_passX1, rect.offset.x + int32_t(rect.extent.width));
@@ -4345,6 +4804,7 @@ namespace Renderer
         BeginFrame();
         EndPass("swap");
         Surface* s = FindSurfaceAt(frontBufferPhysical & 0x1FFFF000u);
+        if (s) MarkSurfaceSampled(s); // the display reads it
         // The display reads the front buffer through the fetch constant's swizzle. D3D's ARGB
         // formats use X<->Z (red/blue exchanged): copy into a BGRA image, which reinterprets
         // the bytes with red and blue swapped, and present that.
@@ -4421,7 +4881,11 @@ namespace Renderer
             std::printf("[render] last 120 frames descriptor sets: %llu allocated, %llu reused\n",
                 (unsigned long long)g_setsAllocated, (unsigned long long)g_setsReused);
             g_setsAllocated = g_setsReused = 0;
-            std::printf("[render] last 120 frames (ms): resolves (CPU) %.0f\n", m.resolve / 1000.0);
+            std::printf("[render] last 120 frames (ms): resolves (CPU) %.0f | resolves %llu, copies skipped (never sampled) %llu = %.1f Mpx, skipped then sampled %llu (copies replayed %llu, lost %llu)\n",
+                m.resolve / 1000.0, (unsigned long long)g_resolveSkip.resolves, (unsigned long long)g_resolveSkip.skipped,
+                double(g_resolveSkip.skippedPixels) / 1e6, (unsigned long long)g_resolveSkip.staleSamples,
+                (unsigned long long)g_resolveSkip.replayed, (unsigned long long)g_resolveSkip.lost);
+            g_resolveSkip = {};
             {
                 // Memory: process (what the OS counts) and Vulkan allocations by kind.
                 constexpr double MB = 1024.0 * 1024.0;
@@ -4494,13 +4958,14 @@ namespace Renderer
             std::printf("[render] last 120 frames textures: %llu composed from resolves (rebuilt), %llu composed fetches\n",
                 (unsigned long long)g_composedBuilds, (unsigned long long)g_composedUses);
             g_composedBuilds = g_composedUses = 0;
-            std::printf("[render] last 120 frames GPU (ms): draws %.0f, resolves %.0f, uploads %.0f, other %.0f | %u render pass begins, %u barriers, %llu EDRAM tiles moved (%llu not copied: overwritten), %zu render targets\n",
-                g_gpuMs[0], g_gpuMs[1], g_gpuMs[2], g_gpuMs[3], g_passBegins, g_barriers, (unsigned long long)g_tileTransfers, (unsigned long long)g_tilesSkipped, g_rts.size());
+            std::printf("[render] last 120 frames GPU (ms): draws %.0f, resolves %.0f, uploads %.0f, EDRAM transfers %.0f, other %.0f | %u render pass begins, %u barriers, %llu EDRAM tiles moved (%llu not copied: overwritten, %llu filled from clears; clear draws %llu, constant %llu, depth %llu), %zu render targets\n",
+                g_gpuMs[0], g_gpuMs[1], g_gpuMs[2], g_gpuMs[4], g_gpuMs[3], g_passBegins, g_barriers, (unsigned long long)g_tileTransfers, (unsigned long long)g_tilesSkipped, (unsigned long long)g_tilesFilled, (unsigned long long)g_clearDraws, (unsigned long long)g_clearDrawsKnown, (unsigned long long)g_depthClearDrawsKnown, g_rts.size());
             {
                 const PassStats& s = g_passStats;
-                std::printf("[passes] last 120 frames: %llu draws in %u passes (0 draws %u, 1 draw %u, 2-4 %u, 5+ %u) | framebuffer load+store %.1f Mpx, touched by draws %.1f Mpx | ended by:",
+                std::printf("[passes] last 120 frames: %llu draws in %u passes (0 draws %u, 1 draw %u, 2-4 %u, 5+ %u) | framebuffer load+store %.1f Mpx, touched by draws %.1f Mpx, attachment loads skipped %.1f Mpx | ended by:",
                     (unsigned long long)s.draws, s.byDraws[0] + s.byDraws[1] + s.byDraws[2] + s.byDraws[3], s.byDraws[0], s.byDraws[1], s.byDraws[2], s.byDraws[3],
-                    s.framebufferPixels / 1e6, s.touchedPixels / 1e6);
+                    s.framebufferPixels / 1e6, s.touchedPixels / 1e6, g_discardedLoadPixels / 1e6);
+                g_discardedLoadPixels = 0;
                 std::vector<std::pair<uint32_t, std::string>> reasons;
                 for (const auto& [why, n] : s.endReasons) reasons.emplace_back(n, why);
                 std::sort(reasons.rbegin(), reasons.rend());
@@ -4508,9 +4973,21 @@ namespace Renderer
                 std::printf("\n");
                 g_passStats = {};
             }
+            if (!g_shaderGpuMs.empty())
+            {
+                // Pixel shaders by GPU time (per-draw timestamps: not on Apple). 1 = no pixel shader.
+                std::vector<std::pair<double, std::pair<uint64_t, uint32_t>>> top;
+                for (const auto& [hash, e] : g_shaderGpuMs) top.push_back({ e.first, { hash, e.second } });
+                std::sort(top.rbegin(), top.rend());
+                std::printf("[shaders] last 120 frames, GPU ms by pixel shader:");
+                for (size_t i = 0; i < top.size() && i < 8; ++i)
+                    std::printf(" %016llx %.1f (%u draws),", (unsigned long long)top[i].second.first, top[i].first, top[i].second.second);
+                std::printf("\n");
+                g_shaderGpuMs.clear();
+            }
             std::memset(g_gpuMs, 0, sizeof(g_gpuMs));
             g_passBegins = g_barriers = 0;
-            g_tileTransfers = g_tilesSkipped = 0;
+            g_tileTransfers = g_tilesSkipped = g_tilesFilled = g_clearDraws = g_clearDrawsKnown = g_depthClearDrawsKnown = 0;
             g_time = {};
             std::fflush(stdout);
             const uint32_t issued = g_stats.issued;
@@ -4615,6 +5092,16 @@ namespace Renderer
                             g_capArmHit = false;
                             g_controlCapture.push_back(arg);
                         }
+                        else if (ok && !std::strcmp(cmd, "passes"))
+                            g_fullPasses = !std::strcmp(arg, "full");
+                        else if (ok && !std::strcmp(cmd, "resolveskip"))
+                            g_noResolveSkip = !std::strcmp(arg, "off");
+                        else if (ok && !std::strcmp(cmd, "discardloads"))
+                            g_noDiscardLoads = !std::strcmp(arg, "off");
+                        else if (ok && !std::strcmp(cmd, "clearfill"))
+                            g_noClearFill = !std::strcmp(arg, "off");
+                        else if (ok && !std::strcmp(cmd, "upscaler"))
+                            Video::SetUpscaler(!std::strcmp(arg, "fsr") ? Video::Upscaler::Fsr1 : !std::strcmp(arg, "sgsr") ? Video::Upscaler::Sgsr1 : Video::Upscaler::Off);
                         else if (n >= 1 && !std::strcmp(cmd, "surfaces"))
                             ok = g_controlDumpSurfaces = true, g_controlDumpAllSurfaces = n >= 2 && !std::strcmp(arg, "all");
                         else if (n >= 1 && !std::strcmp(cmd, "threads"))

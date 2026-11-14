@@ -30,7 +30,7 @@ run iPad apps, so with a Mac on the same network it can install to the Mac inste
 **Entitlements:** the app asks for `extended-virtual-addressing` (the runtime reserves 4 GB of address
 space for the Xbox 360 memory) and `increased-memory-limit` (a match needs ~1 GB). A free Apple ID may
 not be allowed to keep them - AltStore then drops them. If the app quits immediately, check
-`pes13.err.log` for `failed to reserve 4 GB guest address space`: that means the entitlement was
+the newest `logs/pes13 <date> <time>.err.log` for `failed to reserve 4 GB guest address space`: that means the entitlement was
 dropped, and we either need a paid developer account or to shrink the reservation (work on our side).
 On the first device test (free Apple ID, Sideloadly) the reservation succeeded.
 
@@ -52,8 +52,12 @@ game files are missing).
 ## 4. Play / report back
 
 - Controller: any Bluetooth Xbox / PlayStation / MFi controller (pair it in iPad Settings first).
-- Logs: `pes13.log` and `pes13.err.log` in the same Documents folder (copy them back to the PC the
-  same way) - send those to Claude after a failed or odd run.
+- Launch menu: the app opens on a menu (performance overlay and touch controls on/off, remembered);
+  tap Start to run the game.
+- Logs: every session writes its own pair of files to the `logs` folder in Documents,
+  `pes13 <date> <time>.log` and `.err.log` (the newest 10 sessions are kept; nothing is overwritten
+  when the app is restarted). Copy them back to the PC the same way and send them to Claude after
+  a failed or odd run.
 - `userdata/` (saves, shader cache) is created next to them.
 
 ## Known gaps

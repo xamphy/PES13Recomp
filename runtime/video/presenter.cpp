@@ -13,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -191,7 +192,291 @@ namespace
         vkCmdPipelineBarrier(g_cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
     }
 
-    // Copies the game image (width x height, TRANSFER_SRC layout) onto the swap chain image, keeping
+    // ------------------------------------------------------------------ upscaling (FSR 1 / SGSR 1)
+    // The game image is copied into `in` (RGBA, sampled), upscaled by compute shaders to the
+    // on-screen size - FSR 1: EASU into `mid`, RCAS sharpening into `out`; SGSR 1: one pass into
+    // `out` - and `out` is copied 1:1 into the swap chain image. Off: the plain linear blit.
+    const uint32_t kFsrEasuSpv[] =
+#include "shaders/fsr_easu.spv.h"
+    ;
+    const uint32_t kFsrRcasSpv[] =
+#include "shaders/fsr_rcas.spv.h"
+    ;
+    const uint32_t kSgsr1Spv[] =
+#include "shaders/sgsr1.spv.h"
+    ;
+
+    std::atomic<int> g_upscaler{ [] {
+        const char* e = std::getenv("PES_UPSCALER");
+        if (!e) return 0;
+        if (!std::strcmp(e, "fsr") || !std::strcmp(e, "fsr1")) return int(Video::Upscaler::Fsr1);
+        if (!std::strcmp(e, "sgsr") || !std::strcmp(e, "sgsr1")) return int(Video::Upscaler::Sgsr1);
+        return 0;
+    }() };
+
+    std::atomic<uint32_t> g_upscaleHeight{ [] { const char* e = std::getenv("PES_UPSCALE_HEIGHT"); return e ? uint32_t(std::atoi(e)) : 0u; }() };
+
+    struct UpscaleImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
+    struct Upscale
+    {
+        bool initialized = false, usable = false;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkPipeline easu = VK_NULL_HANDLE, rcas = VK_NULL_HANDLE, sgsr = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSet setEasu = VK_NULL_HANDLE, setRcas = VK_NULL_HANDLE, setSgsr = VK_NULL_HANDLE;
+        UpscaleImage in, mid, out;
+        uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
+        // GPU time of the upscale (two timestamps per frame), averaged over 120 frames for the log.
+        VkQueryPool queries = VK_NULL_HANDLE;
+        bool queryPending = false;
+        double gpuMs = 0;
+        uint32_t frames = 0;
+    } g_up;
+
+    VkPipeline CreateComputePipeline(const uint32_t* code, size_t size)
+    {
+        VkShaderModuleCreateInfo mi{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        mi.codeSize = size;
+        mi.pCode = code;
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (!Check(vkCreateShaderModule(g_device, &mi, nullptr, &module), "vkCreateShaderModule (upscaler)")) return VK_NULL_HANDLE;
+        VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = module;
+        ci.stage.pName = "main";
+        ci.layout = g_up.layout;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        Check(vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline), "vkCreateComputePipelines (upscaler)");
+        vkDestroyShaderModule(g_device, module, nullptr);
+        return pipeline;
+    }
+
+    // Pipelines, sampler, descriptor sets (once). False if the device cannot run the upscalers.
+    bool InitUpscale()
+    {
+        if (g_up.initialized) return g_up.usable;
+        g_up.initialized = true;
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(g_physical, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        if ((fp.optimalTilingFeatures & need) != need)
+        {
+            std::fprintf(stderr, "[video] upscaling unavailable: RGBA8 storage images not supported - plain scaling\n");
+            return false;
+        }
+        VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(g_device, &si, nullptr, &g_up.sampler);
+        const VkDescriptorSetLayoutBinding bindings[2] = {
+            { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+        };
+        VkDescriptorSetLayoutCreateInfo li{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        li.bindingCount = 2;
+        li.pBindings = bindings;
+        vkCreateDescriptorSetLayout(g_device, &li, nullptr, &g_up.setLayout);
+        const VkPushConstantRange push{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 80 };
+        VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &g_up.setLayout;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &push;
+        vkCreatePipelineLayout(g_device, &pli, nullptr, &g_up.layout);
+        g_up.easu = CreateComputePipeline(kFsrEasuSpv, sizeof(kFsrEasuSpv));
+        g_up.rcas = CreateComputePipeline(kFsrRcasSpv, sizeof(kFsrRcasSpv));
+        g_up.sgsr = CreateComputePipeline(kSgsr1Spv, sizeof(kSgsr1Spv));
+        const VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 }, { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 } };
+        VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpi.maxSets = 3;
+        dpi.poolSizeCount = 2;
+        dpi.pPoolSizes = sizes;
+        vkCreateDescriptorPool(g_device, &dpi, nullptr, &g_up.pool);
+        const VkDescriptorSetLayout layouts[3] = { g_up.setLayout, g_up.setLayout, g_up.setLayout };
+        VkDescriptorSetAllocateInfo dai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dai.descriptorPool = g_up.pool;
+        dai.descriptorSetCount = 3;
+        dai.pSetLayouts = layouts;
+        VkDescriptorSet sets[3] = {};
+        vkAllocateDescriptorSets(g_device, &dai, sets);
+        g_up.setEasu = sets[0];
+        g_up.setRcas = sets[1];
+        g_up.setSgsr = sets[2];
+        VkQueryPoolCreateInfo qi{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = 2;
+        vkCreateQueryPool(g_device, &qi, nullptr, &g_up.queries);
+        g_up.usable = g_up.easu && g_up.rcas && g_up.sgsr && g_up.setSgsr;
+        if (!g_up.usable)
+            std::fprintf(stderr, "[video] upscaling unavailable: pipeline creation failed - plain scaling\n");
+        return g_up.usable;
+    }
+
+    void DestroyUpscaleImage(UpscaleImage& i)
+    {
+        if (i.view) vkDestroyImageView(g_device, i.view, nullptr);
+        if (i.image) vkDestroyImage(g_device, i.image, nullptr);
+        if (i.memory) vkFreeMemory(g_device, i.memory, nullptr);
+        i = {};
+    }
+
+    bool CreateUpscaleImage(UpscaleImage& i, uint32_t w, uint32_t h, VkImageUsageFlags usage)
+    {
+        DestroyUpscaleImage(i);
+        VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ii.imageType = VK_IMAGE_TYPE_2D;
+        ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ii.extent = { w, h, 1 };
+        ii.mipLevels = ii.arrayLayers = 1;
+        ii.samples = VK_SAMPLE_COUNT_1_BIT;
+        ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage = usage;
+        if (!Check(vkCreateImage(g_device, &ii, nullptr, &i.image), "vkCreateImage (upscaler)")) return false;
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(g_device, i.image, &req);
+        VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (!Check(vkAllocateMemory(g_device, &ai, nullptr, &i.memory), "vkAllocateMemory (upscaler)")) return false;
+        vkBindImageMemory(g_device, i.image, i.memory, 0);
+        VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vi.image = i.image;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        return Check(vkCreateImageView(g_device, &vi, nullptr, &i.view), "vkCreateImageView (upscaler)");
+    }
+
+    void WriteUpscaleSet(VkDescriptorSet set, const UpscaleImage& input, VkImageLayout inputLayout, const UpscaleImage& output)
+    {
+        const VkDescriptorImageInfo src{ g_up.sampler, input.view, inputLayout };
+        const VkDescriptorImageInfo dst{ VK_NULL_HANDLE, output.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }, { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET } };
+        w[0].dstSet = w[1].dstSet = set;
+        w[0].dstBinding = 0;
+        w[0].descriptorCount = 1;
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[0].pImageInfo = &src;
+        w[1].dstBinding = 1;
+        w[1].descriptorCount = 1;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[1].pImageInfo = &dst;
+        vkUpdateDescriptorSets(g_device, 2, w, 0, nullptr);
+    }
+
+    // Images for an inW x inH -> outW x outH upscale (recreated when a size changes).
+    bool PrepareUpscale(uint32_t inW, uint32_t inH, uint32_t outW, uint32_t outH)
+    {
+        if (!InitUpscale()) return false;
+        if (g_up.inW == inW && g_up.inH == inH && g_up.outW == outW && g_up.outH == outH && g_up.out.image) return true;
+        vkDeviceWaitIdle(g_device);
+        const bool ok = CreateUpscaleImage(g_up.in, inW, inH, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+            CreateUpscaleImage(g_up.mid, outW, outH, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) &&
+            CreateUpscaleImage(g_up.out, outW, outH, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (!ok)
+        {
+            DestroyUpscaleImage(g_up.in); DestroyUpscaleImage(g_up.mid); DestroyUpscaleImage(g_up.out);
+            g_up.inW = g_up.inH = g_up.outW = g_up.outH = 0;
+            return false;
+        }
+        WriteUpscaleSet(g_up.setEasu, g_up.in, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, g_up.mid);
+        WriteUpscaleSet(g_up.setRcas, g_up.mid, VK_IMAGE_LAYOUT_GENERAL, g_up.out);
+        WriteUpscaleSet(g_up.setSgsr, g_up.in, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, g_up.out);
+        g_up.inW = inW; g_up.inH = inH; g_up.outW = outW; g_up.outH = outH;
+        g_up.queryPending = false;
+        std::printf("[video] upscaler images: %ux%u -> %ux%u\n", inW, inH, outW, outH);
+        return true;
+    }
+
+    uint32_t AsU32(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+
+    // Upscales `source` (inW x inH, TRANSFER_SRC) into g_up.out (outW x outH, left in TRANSFER_SRC).
+    void RecordUpscale(VkImage source, uint32_t inW, uint32_t inH, uint32_t outW, uint32_t outH, Video::Upscaler which)
+    {
+        // Last frame's timing (the fence of that frame has been waited for).
+        if (g_up.queryPending)
+        {
+            uint64_t ts[2] = {};
+            if (vkGetQueryPoolResults(g_device, g_up.queries, 0, 2, sizeof(ts), ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+            {
+                VkPhysicalDeviceProperties props;
+                vkGetPhysicalDeviceProperties(g_physical, &props);
+                g_up.gpuMs += double(ts[1] - ts[0]) * props.limits.timestampPeriod / 1e6;
+                if (++g_up.frames == 120)
+                {
+                    std::printf("[video] upscaler %s %ux%u -> %ux%u: %.2f ms GPU per frame\n", which == Video::Upscaler::Fsr1 ? "FSR 1" : "SGSR 1",
+                        inW, inH, outW, outH, g_up.gpuMs / 120.0);
+                    g_up.gpuMs = 0;
+                    g_up.frames = 0;
+                }
+            }
+        }
+        vkCmdResetQueryPool(g_cmd, g_up.queries, 0, 2);
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_up.queries, 0);
+
+        // Game image -> `in` (the blit also converts BGRA game images to RGBA).
+        Barrier(g_up.in.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageBlit copy{};
+        copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.srcOffsets[1] = copy.dstOffsets[1] = { int32_t(inW), int32_t(inH), 1 };
+        vkCmdBlitImage(g_cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_up.in.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy, VK_FILTER_NEAREST);
+        Barrier(g_up.in.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        Barrier(g_up.out.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        uint32_t pc[20] = {};
+        if (which == Video::Upscaler::Fsr1)
+        {
+            // FsrEasuCon (ffx_fsr1.h): input viewport = input size.
+            const float iw = float(inW), ih = float(inH), ow = float(outW), oh = float(outH);
+            pc[0] = AsU32(iw / ow);                 pc[1] = AsU32(ih / oh);
+            pc[2] = AsU32(0.5f * iw / ow - 0.5f);   pc[3] = AsU32(0.5f * ih / oh - 0.5f);
+            pc[4] = AsU32(1.0f / iw);               pc[5] = AsU32(1.0f / ih);
+            pc[6] = AsU32(1.0f / iw);               pc[7] = AsU32(-1.0f / ih);
+            pc[8] = AsU32(-1.0f / iw);              pc[9] = AsU32(2.0f / ih);
+            pc[10] = AsU32(1.0f / iw);              pc[11] = AsU32(2.0f / ih);
+            pc[12] = AsU32(0.0f);                   pc[13] = AsU32(4.0f / ih);
+            pc[14] = pc[15] = 0;
+            pc[16] = outW; pc[17] = outH;
+            Barrier(g_up.mid.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.easu);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.layout, 0, 1, &g_up.setEasu, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_up.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 80, pc);
+            vkCmdDispatch(g_cmd, (outW + 15) / 16, (outH + 15) / 16, 1);
+            Barrier(g_up.mid.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            // FsrRcasCon: sharpness 0.2 stops (AMD's usual default), converted from stops to linear.
+            pc[0] = AsU32(std::exp2(-0.2f));
+            pc[1] = pc[2] = pc[3] = 0;
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.rcas);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.layout, 0, 1, &g_up.setRcas, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_up.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 80, pc);
+            vkCmdDispatch(g_cmd, (outW + 15) / 16, (outH + 15) / 16, 1);
+        }
+        else
+        {
+            const float info[4] = { 1.0f / float(inW), 1.0f / float(inH), float(inW), float(inH) };
+            std::memcpy(pc, info, sizeof(info));
+            pc[4] = outW; pc[5] = outH;
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.sgsr);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_up.layout, 0, 1, &g_up.setSgsr, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_up.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 80, pc);
+            vkCmdDispatch(g_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
+        }
+        Barrier(g_up.out.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_up.queries, 1);
+        g_up.queryPending = true;
+    }
+
     // its aspect ratio: scaled to fit and centred, with black bars on the sides or top/bottom (e.g. a
     // 16:9 game on the ~1.44:1 iPad screen, or a resized window). PES_STRETCH=1 fills the whole window
     // (the old behaviour). Leaves `target` in PRESENT_SRC layout.
@@ -218,6 +503,26 @@ namespace
         }
         const bool bars = x0 > 0 || y0 > 0 || x1 < dstW || y1 < dstH;
 
+        // Upscaler: only when the picture is enlarged. Its output is the on-screen size, or lower when
+        // an output height is set (then scaled to the screen below with linear filtering).
+        const auto which = Video::Upscaler(g_upscaler.load());
+        const uint32_t fitW = uint32_t(std::max(x1 - x0, 0)), fitH = uint32_t(std::max(y1 - y0, 0));
+        uint32_t upW = fitW, upH = fitH;
+        if (const uint32_t limit = g_upscaleHeight.load(); limit && limit < fitH)
+        {
+            upH = limit;
+            upW = uint32_t((uint64_t(fitW) * limit + fitH / 2) / fitH);
+        }
+        bool upscaled = false;
+        if (which != Video::Upscaler::Off && upW > width && upH > height && PrepareUpscale(width, height, upW, upH))
+        {
+            RecordUpscale(source, width, height, upW, upH, which);
+            source = g_up.out.image;
+            width = upW;
+            height = upH;
+            upscaled = upW == fitW && upH == fitH; // 1:1 copy; otherwise still a linear scale
+        }
+
         Barrier(target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         if (bars)
@@ -237,7 +542,7 @@ namespace
             blit.dstOffsets[0] = { x0, y0, 0 };
             blit.dstOffsets[1] = { x1, y1, 1 };
             vkCmdBlitImage(g_cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &blit, VK_FILTER_LINEAR);
+                1, &blit, upscaled ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         }
         Barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
@@ -529,6 +834,20 @@ namespace Video
             vkDeviceWaitIdle(g_device);
             DestroySwapchain();
         }
+    }
+
+    void SetUpscaler(Upscaler upscaler)
+    {
+        if (g_upscaler.exchange(int(upscaler)) != int(upscaler))
+            std::printf("[video] upscaling: %s\n", upscaler == Upscaler::Fsr1 ? "FSR 1" : upscaler == Upscaler::Sgsr1 ? "SGSR 1" : "off");
+    }
+
+    Upscaler GetUpscaler() { return Upscaler(g_upscaler.load()); }
+
+    void SetUpscaleHeight(uint32_t height)
+    {
+        if (g_upscaleHeight.exchange(height) != height)
+            std::printf("[video] upscaling output height: %s\n", height ? std::to_string(height).c_str() : "screen");
     }
 
     bool WindowHasFocus() { return Window::HasFocus(); }

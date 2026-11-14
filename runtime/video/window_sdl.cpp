@@ -10,6 +10,8 @@
 #include "prompt_apple.h"
 #include "touch_controls_ios.h"
 #include "perf_overlay_ios.h"
+#include "launcher_ios.h"
+#include "launcher/launcher_core.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -23,9 +25,13 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
+
+namespace Kernel { void DumpGuestThreads(); } // kernel/thread.h
 
 namespace
 {
@@ -137,6 +143,9 @@ namespace
     void* AppThread(void* p)
     {
         const AppArgs* a = static_cast<const AppArgs*>(p);
+#if TARGET_OS_IOS
+        Video::Apple::RunLauncher(); // launch menu first (settings, Start)
+#endif
         const int code = a->appMain(a->argc, a->argv);
         std::fflush(stdout);
         std::fflush(stderr);
@@ -184,9 +193,13 @@ namespace Video::Window
 #if TARGET_OS_IOS
             if (void* uiWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr))
             {
-                Apple::InstallPerfOverlay(uiWindow); // first: it stays under the touch controls
-                Apple::InstallTouchControls(uiWindow);
-                Apple::SetTouchControlsVisible(!AnyPadConnected());
+                const Launcher::Settings& launch = Launcher::Current();
+                if (launch.perfOverlay) Apple::InstallPerfOverlay(uiWindow); // first: it stays under the touch controls
+                if (launch.touchControls)
+                {
+                    Apple::InstallTouchControls(uiWindow);
+                    Apple::SetTouchControlsVisible(!AnyPadConnected());
+                }
             }
 #endif
             ok = true;
@@ -286,11 +299,34 @@ namespace Video
 
 #if TARGET_OS_IOS
         // iPadOS: no command line and no console. Work in the app's Documents folder (visible in the
-        // Files app: copy game/xex and game/files there), log to Documents/pes13.log, always run.
+        // Files app: copy game/xex and game/files there), always run. Every session logs to its own
+        // pair of files, Documents/logs/pes13 <date> <time>.log / .err.log, so nothing is overwritten
+        // when the app is restarted; the newest kLogSessions sessions are kept.
         if (const char* docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS))
             chdir(docs);
-        std::freopen("pes13.log", "w", stdout);
-        std::freopen("pes13.err.log", "w", stderr);
+        {
+            constexpr size_t kLogSessions = 10;
+            std::error_code ec;
+            std::filesystem::create_directory("logs", ec);
+            std::vector<std::filesystem::path> logs;
+            for (const auto& entry : std::filesystem::directory_iterator("logs", ec))
+                if (entry.path().extension() == ".log" && entry.path().filename().string().rfind("pes13 ", 0) == 0)
+                    logs.push_back(entry.path());
+            std::sort(logs.begin(), logs.end()); // the name starts with the date: oldest first
+            // Two files per session; keep room for this one.
+            while (logs.size() + 2 > kLogSessions * 2)
+            {
+                std::filesystem::remove(logs.front(), ec);
+                logs.erase(logs.begin());
+            }
+            char stamp[32] = "session";
+            const std::time_t now = std::time(nullptr);
+            if (const std::tm* t = std::localtime(&now))
+                std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", t);
+            const std::string base = std::string("logs/pes13 ") + stamp;
+            std::freopen((base + ".log").c_str(), "w", stdout);
+            std::freopen((base + ".err.log").c_str(), "w", stderr);
+        }
         std::setvbuf(stdout, nullptr, _IONBF, 0);
         std::setvbuf(stderr, nullptr, _IONBF, 0);
         static std::vector<char*> iosArgv;
@@ -307,7 +343,12 @@ namespace Video
         SDL_AddEventWatch([](void*, SDL_Event* e) -> bool
         {
             if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND)
+            {
+                // Record what every guest thread is doing: a user stuck on a loading screen
+                // usually switches away before restarting, so a hang leaves its waits in the log.
+                Kernel::DumpGuestThreads();
                 SetAppInBackground(true);
+            }
             else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND)
                 SetAppInBackground(false);
             return true;
