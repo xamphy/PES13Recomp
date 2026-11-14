@@ -5,9 +5,8 @@
 </p>
 
 > **Experimental branch - untested.** Everything here is newer than iPad build #17 and has not been
-> confirmed on a device yet: render-pass and resolve optimizations for the iPad GPU, FSR 1 / SGSR 1
-> upscaling, a launch menu on Windows and iPad (Play Game / Settings / About), per-session log files
-> on iPad. The last build tested on the iPad (build #17) is on the `main` branch.
+> confirmed on a device yet - see [What's new on this branch](#whats-new-on-this-branch). The last
+> build tested on the iPad (build #17) is on the `main` branch.
 
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
@@ -36,8 +35,58 @@
 > saves), but expect bugs. On iPad (M2) matches are playable at 40-45 fps with touch controls or a
 > controller; set pieces, cutscenes and the Game Plan screen still drop to 10-25 fps.
 
+
+## What's new on this branch
+
+Changes since iPad build #17 (the tested build on `main`). **None of this has been confirmed on an
+iPad yet**; everything was checked on Windows only (screenshots, Vulkan validation, A/B runs). Most
+items can be switched off for comparison (see the variables in brackets).
+
+**Fixes**
+- **Texture mip levels.** Textures were created with a single level and sampled at full resolution
+  even far away, so the pitch and other detailed surfaces shimmered like a CRT with no signal while
+  the camera moved. The mip levels are now read from the game's memory (packed mip tail included)
+  and sampled with the game's mip filter, level range and anisotropic filtering.
+  (`PES_NO_MIPS=1`)
+
+**iPad GPU performance** - the iPad is GPU-bound (the renderer itself needs only a few ms of CPU per
+frame), and its tile-based GPU pays for every render pass and every copy between passes:
+- Resolve copies that nothing ever samples (shadow-map colour, unused depth copies: about a third
+  of the resolves) are skipped, and replayed if a skipped surface is sampled after all.
+  (`PES_NO_RESOLVE_SKIP=1`)
+- Render passes cover only the area their draws touch instead of the whole render target, and
+  passes that begin with a full clear skip loading the old contents.
+  (`PES_PASS_FULL=1`, `PES_NO_DISCARD_LOADS=1`)
+- Cleared EDRAM tiles are filled inside the next render pass instead of being copied between
+  render targets (the game clears through 4x-MSAA aliases of its targets): about 80% fewer tile
+  copies and far fewer split passes in matches. (`PES_NO_CLEAR_FILL=1`)
+- On Windows, a match measured about 22-25% less GPU time with everything on. The iPad gain is
+  still to be measured: the log now splits GPU time on the iPad into draws / resolves / uploads /
+  EDRAM transfers / other.
+
+**Upscaling**
+- Optional AMD FidelityFX **FSR 1** (EASU + RCAS) or Snapdragon **SGSR 1** for the final picture,
+  instead of plain scaling - sharper text, kits and lines on the iPad screen or a large window.
+  The upscaler's output resolution can be set (Screen / 1440p / 1080p / 900p). Its GPU time is in
+  the log. (`PES_UPSCALER=fsr|sgsr`, `PES_UPSCALE_HEIGHT=1080`)
+
+**Launch menu** (Windows and iPad/iPhone)
+- Opens before the game: a stadium background drawn in code, **Play Game**, **Settings**
+  (upscaling, upscaling resolution; on iPad also touch controls and the performance overlay) and
+  **About** (build, device and GPU, game files check, credits, disclaimer). Settings are saved in
+  `userdata/launcher.ini`. Windows: mouse, keyboard or an Xbox controller; `--no-launcher` skips it.
+
+**iPad**
+- Every session writes its own log files, `Documents/logs/pes13 <date> <time>.log` / `.err.log`
+  (the newest 10 sessions are kept), so restarting the app no longer overwrites a log.
+- When the app goes to the background, the log records what every game thread is doing (helps
+  with hangs), and GPU memory allocation failures are logged.
+- iPhone installs are allowed, for testing the launch menu (the game needs a fast Apple GPU and
+  enough memory for its 4 GB reservation).
+
 ## Contents
 
+- [What's new on this branch](#whats-new-on-this-branch)
 - [Features](#features)
 - [Status](#status)
 - [Building and playing on Windows](#building-and-playing-on-windows)
@@ -179,7 +228,8 @@ On iPad the same layout lives in the app's Documents folder (Files → On My iPa
 Open an issue and attach the logs of the run:
 
 - Windows: run `pes13.exe --run > userdata\run.log 2> userdata\run.err.log`.
-- iPad: `pes13.log` and `pes13.err.log` are in the app's Documents folder.
+- iPad: the `logs` folder in the app's Documents folder has one `pes13 <date> <time>.log` / `.err.log`
+  pair per session (send the pair of the session with the problem).
 
 A crash prints a `[crash]` line with the guest call stack in the error log. Include what you were
 doing, and for graphics bugs add a screenshot. Please don't attach game files.
@@ -239,6 +289,9 @@ The architecture and plan are described in [docs/PLAN.md](docs/PLAN.md).
   [volk](https://github.com/zeux/volk), [miniaudio](https://github.com/mackron/miniaudio),
   [glslang](https://github.com/KhronosGroup/glslang), [fmt](https://github.com/fmtlib/fmt),
   [extract-xiso](https://github.com/XboxDev/extract-xiso)
+- [AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT, `thirdparty/fsr1`) and
+  [Snapdragon Game Super Resolution 1](https://github.com/SnapdragonStudios/snapdragon-gsr)
+  (BSD-3-Clause, `thirdparty/sgsr1`): the upscalers on this branch
 - [Unleashed Recompiled](https://github.com/hedge-dev/UnleashedRecomp) and the other projects in
   [awesome-x360-recomps](https://github.com/abduznik/awesome-x360-recomps), for showing the way
 
