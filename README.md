@@ -4,6 +4,11 @@
   <b>An unofficial native port of Pro Evolution Soccer 2013 (Xbox 360), built by static recompilation, for Windows and iPad.</b>
 </p>
 
+> **Experimental branch - untested.** Everything here is newer than iPad build #17 and has not been
+> confirmed on a device yet: render-pass and resolve optimizations for the iPad GPU, FSR 1 / SGSR 1
+> upscaling, a launch menu on Windows and iPad (Play Game / Settings / About), per-session log files
+> on iPad. The last build tested on the iPad (build #17) is on the `main` branch.
+
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D6">
