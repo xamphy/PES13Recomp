@@ -4,9 +4,10 @@
   <b>An unofficial native port of Pro Evolution Soccer 2013 (Xbox 360), built by static recompilation, for Windows and iPad.</b>
 </p>
 
-> **Experimental branch - untested.** Everything here is newer than iPad build #17 and has not been
-> confirmed on a device yet - see [What's new on this branch](#whats-new-on-this-branch). The last
-> build tested on the iPad (build #17) is on the `main` branch.
+> **Experimental branch - not yet tested on an iPad.** Everything here is newer than iPad build #17.
+> Build #28 has been tested on an **iPhone 11** (see [iPhone 11 test](#iphone-11-test-build-28)),
+> not yet on an iPad - see [What's new on this branch](#whats-new-on-this-branch). The last build
+> tested on the iPad (build #17) is on the `main` branch.
 
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
@@ -39,15 +40,32 @@
 ## What's new on this branch
 
 Changes since iPad build #17 (the tested build on `main`). **None of this has been confirmed on an
-iPad yet**; everything was checked on Windows only (screenshots, Vulkan validation, A/B runs). Most
-items can be switched off for comparison (see the variables in brackets).
+iPad yet**; everything was checked on Windows (screenshots, Vulkan validation, A/B runs), and
+build #28 has been played on an iPhone 11 (results below). Most items can be switched off for
+comparison (see the variables in brackets).
+
+### iPhone 11 test (build #28)
+
+Played on an iPhone 11 (Apple A13 GPU, 4 GB RAM) on 2026-11-15, with touch controls and with a
+Razer Kishi V2 controller.
+- **Works:** the launch menu (settings are saved), the controller (touch controls hide while it is
+  connected and come back when it disconnects), matches, menus. No crashes in three play sessions.
+- **Fixed on a device:** the pitch's TV-static shimmer in motion is gone (texture mip levels).
+- **Free Training after a match** (the hang seen on iPad build #17) loaded normally - no hang.
+- **Performance:** GPU-bound. Menus ~60 fps, matches 20-30 fps (~38 ms GPU per frame). Replays,
+  set pieces, the pause menu and the Game Plan screen drop to 11-12 fps (64-90 ms GPU per frame;
+  the game keeps drawing the whole match behind the blurred pause menu, and some scenes split into
+  ~130 one-draw render passes per frame, which tile-based GPUs pay for).
+- **FSR 1** costs about 2.1 ms GPU per frame on the A13 - leave upscaling off on older iPhones.
+- The phone reaches the "serious" thermal state after 10-15 minutes; frame rates barely changed.
+- Next: fewer, larger render passes for the heavy scenes (the iPhone numbers are the benchmark).
 
 **Fixes**
 - **Texture mip levels.** Textures were created with a single level and sampled at full resolution
   even far away, so the pitch and other detailed surfaces shimmered like a CRT with no signal while
   the camera moved. The mip levels are now read from the game's memory (packed mip tail included)
   and sampled with the game's mip filter, level range and anisotropic filtering.
-  (`PES_NO_MIPS=1`)
+  (`PES_NO_MIPS=1`) **Confirmed on an iPhone 11.**
 
 **iPad GPU performance** - the iPad is GPU-bound (the renderer itself needs only a few ms of CPU per
 frame), and its tile-based GPU pays for every render pass and every copy between passes:
@@ -81,8 +99,9 @@ frame), and its tile-based GPU pays for every render pass and every copy between
   (the newest 10 sessions are kept), so restarting the app no longer overwrites a log.
 - When the app goes to the background, the log records what every game thread is doing (helps
   with hangs), and GPU memory allocation failures are logged.
-- iPhone installs are allowed, for testing the launch menu (the game needs a fast Apple GPU and
-  enough memory for its 4 GB reservation).
+- iPhone installs are allowed. Tested on an iPhone 11 (A13): playable, 20-30 fps in matches
+  (see [iPhone 11 test](#iphone-11-test-build-28)). The game needs enough memory for its 4 GB
+  reservation.
 
 ## Contents
 

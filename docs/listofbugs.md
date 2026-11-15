@@ -61,7 +61,7 @@ Format: **title** - symptom. Where / notes. (source / date)
   log: that log starts after the restart. Does NOT reproduce on Windows (2026-11-14: full match, results
   "Return to Top Menu", Training, Free Training loads in ~10 s). Build #20+ keep one log per session and
   dump the guest threads when the app goes to the background - need a log of a hang. (tester, iPad run
-  #17, 2026-11-12)
+  #17, 2026-11-12) 2026-11-15: the same steps on build #28 on an iPhone 11 - no hang.
 - **Heavy scenes slow on iPad** (GPU-bound) - tester on run #17: match play 60 fps (54 sometimes, ~50
   near the goals), replays 15-23 fps, goal celebration 13 fps, Free Training a steady 30 fps, Become a
   Legend cutscenes 20 fps. Log: those scenes take 33-65 ms of GPU time per frame with ~47-49 render
@@ -69,6 +69,10 @@ Format: **title** - symptom. Where / notes. (source / date)
   load+store per frame). Device was "thermal serious" from launch. (tester + log, 2026-11-12)
   2026-11-14: resolve skip, pass areas, discard loads and clear fills (builds #20-#26; Windows: GPU
   -22..25%, tile copies -80%) - iPad effect not measured yet; the log now splits GPU time by category.
+  2026-11-15, iPhone 11 (A13) on build #28: matches 20-30 fps; slow: replays, set pieces, the
+  pause menu, the Game Plan screen (log: 11-12 fps, 64-90 ms GPU per frame, some scenes ~130
+  one-draw render passes per frame). Normal 3D ~38 ms GPU (draws 28, EDRAM transfers 5). FSR 1
+  costs 2.1 ms per frame.
 - **4 GB guest reservation needs `extended-virtual-addressing`** - a free Apple ID may drop this
   entitlement. If it does, the session's `logs/pes13 <date> <time>.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
   a paid developer account, or shrink the reservation. (IPAD.md)
@@ -79,8 +83,8 @@ Format: **title** - symptom. Where / notes. (source / date)
 - 2026-11-14 - **Pitch shimmered like TV static in motion** (user, d82f660): textures had one mip level
   and samplers maxLod 0.25, so distant surfaces were sampled at full resolution. The guest mip chain
   (packed tail included) is now uploaded and sampled with the game's mip filter, level range and
-  anisotropy. `PES_NO_MIPS=1` = old behaviour. Checked on Windows stills; in motion still to be
-  confirmed by the user.
+  anisotropy. `PES_NO_MIPS=1` = old behaviour. Confirmed fixed in motion on a device (build #28,
+  iPhone 11, 2026-11-15).
 - 2026-11-10 - 188 `// ERROR` branches in 15 functions (branch `fix-error-branches`, commit 45d71a0):
   14 jump-table functions had hand-set sizes in `config/pes13.toml` that stopped before their last
   few instructions (the Game Plan bug again), so every `switch` case that jumped to the shared end
