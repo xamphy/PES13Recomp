@@ -431,6 +431,9 @@ namespace Video
         {
             // Wait for submits already past the check; new ones now wait in GpuSubmitScope.
             g_submitLock.lock();
+            // With asynchronous MoltenVK submits the Metal command buffers may still be waiting
+            // to be committed: drain the queue now, while no submit can start (we hold the lock).
+            if (g_queue) vkQueueWaitIdle(g_queue);
             g_submitLock.unlock();
             std::printf("[video] app in background - GPU work paused\n");
         }
