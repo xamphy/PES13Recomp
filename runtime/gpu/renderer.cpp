@@ -89,7 +89,13 @@ namespace
     // GPU timestamps: each mark closes an interval since the previous mark and attributes it
     // to a category (0 draw, 1 resolve, 2 texture upload, 3 other: barriers, pass changes, gaps).
     VkQueryPool g_tsPool = VK_NULL_HANDLE;
+#ifdef __APPLE__
+    // Metal counter sample buffers hold at most 32 KB (4096 timestamps); a bigger pool makes
+    // MoltenVK fall back to emulated timestamps that always read 0.
+    constexpr uint32_t kMaxTimestamps = 4096;
+#else
     constexpr uint32_t kMaxTimestamps = 16384;
+#endif
     constexpr uint32_t kFramesInFlight = 2;
     uint32_t g_tsCount = 0;
     uint8_t* g_tsCategory = nullptr; // the current frame slot's array
@@ -801,6 +807,13 @@ namespace
     uint64_t g_passSlotFrame = ~0ull;
     uint32_t g_passSlot = 0; // the current pass's n
     bool g_fullPasses = std::getenv("PES_PASS_FULL") != nullptr; // whole-image passes (A/B; PES_CONTROL "passes full/area")
+    // PES_CONTROL "passlog <frames>": print every render pass of the next frames (attachments, area,
+    // draws with their pixel shaders, end reason) - to see the pass structure of a scene.
+    bool g_noDepthKeep = std::getenv("PES_NO_DEPTH_KEEP") != nullptr; // see DrawImpl, before BeginPass
+    uint64_t g_depthKeptDraws = 0; // stats: no-depth draws that stayed in a pass with depth
+    uint32_t g_passLogFrames = 0;
+    bool g_passLogNow = false;
+    std::string g_passLogDraws;
     bool g_noDiscardLoads = std::getenv("PES_NO_DISCARD_LOADS") != nullptr; // see BeginPass
     uint64_t g_discardedLoadPixels = 0; // attachment pixels not loaded (stats)
     constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT; // also on Apple GPUs (no D24S8 there)
@@ -1414,6 +1427,15 @@ namespace
             s.touchedPixels += uint64_t(std::min<int32_t>(g_passX1, int32_t(g_passExtent.width)) - g_passX0) *
                 uint64_t(std::min<int32_t>(g_passY1, int32_t(g_passExtent.height)) - g_passY0);
         vkCmdEndRenderPass(g_cmd);
+        if (g_passLogNow)
+        {
+            std::printf("[passlog] f%llu color %s depth %s | %ux%u (need %ux%u) | %u draws:%s | end: %s\n", (unsigned long long)g_frame,
+                g_passColor ? (std::to_string(g_passColor->base) + "/" + std::to_string(int(g_passColor->format)) + "x" + std::to_string(uint32_t(g_passColor->msaa))).c_str() : "-",
+                g_passDepth ? std::to_string(g_passDepth->base).c_str() : "-",
+                g_passExtent.width, g_passExtent.height, g_passNeed.width, g_passNeed.height, g_passDraws, g_passLogDraws.c_str(),
+                g_passEndContext ? g_passEndContext : why);
+            g_passLogDraws.clear();
+        }
         // Area this pass needed (predicts the same pass next frame, see BeginPass).
         {
             PassArea& h = g_passAreaHistory[{ g_passColor, g_passDepth, g_passSlot }];
@@ -4077,7 +4099,7 @@ namespace
             pd.colorMask = 0xF;
             pd.blend = 0x00010001;
         }
-        const VkPipeline pipeline = GetPipeline(pd);
+        VkPipeline pipeline = GetPipeline(pd);
         if (!pipeline) { ++g_stats.noPipeline; return; }
         // What this render target was last drawn from (PrepareResolveForCpu tells name/number tiles,
         // drawn from small glyph sheets, from kit LOD atlases, drawn from a 512x256 kit).
@@ -4324,7 +4346,31 @@ namespace
                 }
             }
         }
-        BeginPass(rt, depthRt, &passNeed, discardColor, discardDepth);
+        // A draw without depth/stencil on the color target of the open pass keeps that pass's depth
+        // attachment (depth test, write and stencil off) instead of starting a color-only pass: the
+        // game alternates depth and no-depth draws on its scene targets, and on the tile-based iPad
+        // GPU every pass switch stores and reloads the targets. PES_NO_DEPTH_KEEP=1 /
+        // PES_CONTROL "depthkeep off": a color-only pass (A/B).
+        RenderTarget* passDepthRt = depthRt;
+        if (!depthRt && !g_noDepthKeep && g_inPass && g_passColor == rt && g_passDepth)
+        {
+            const VkExtent2D fe = PassExtent(rt, g_passDepth);
+            if (passNeed.offset.x + int32_t(passNeed.extent.width) <= int32_t(fe.width) &&
+                passNeed.offset.y + int32_t(passNeed.extent.height) <= int32_t(fe.height))
+            {
+                PipelineDesc kd = pd;
+                kd.depthFormat = kDepthFormat;
+                kd.depthControl = 0; // no depth test / write, no stencil
+                kd.depthClamp = false;
+                if (const VkPipeline kp = GetPipeline(kd))
+                {
+                    pipeline = kp;
+                    passDepthRt = g_passDepth;
+                    ++g_depthKeptDraws;
+                }
+            }
+        }
+        BeginPass(rt, passDepthRt, &passNeed, discardColor, discardDepth && depthRt);
         if (!colorFills.empty() || !depthFills.empty())
         {
             // Thousands of tiles per frame: tiles next to each other in a row with the same value
@@ -4387,13 +4433,20 @@ namespace
             vkCmdDraw(g_cmd, count, 1, 0, 0);
         g_markShader = ps ? ps->shader->ucode_data_hash() : 1; // 1: no pixel shader
         MarkGpu(0);
+        if (g_passLogNow && g_passLogDraws.size() < 600)
+        {
+            char d[96];
+            std::snprintf(d, sizeof(d), " %s%04llx@%d,%d+%ux%u", knownClear || knownDepthClear ? "CLR:" : "",
+                (unsigned long long)(g_markShader & 0xFFFF), rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height);
+            g_passLogDraws += d;
+        }
         if (knownClear) MarkTilesCleared(rt, clearArea, clearValue); // after AcquireTiles forgot the old values
         if (knownDepthClear) MarkTilesCleared(depthRt, depthClearArea, depthClearValue);
         g_markShader = 0;
         ++g_stats.issued;
         ++g_passDraws;
         if (g_passColor) ++g_passColor->writeSerial;
-        if (g_passDepth) ++g_passDepth->writeSerial;
+        if (g_passDepth && depthRt) ++g_passDepth->writeSerial; // a kept depth attachment is not written
         g_passX0 = std::min(g_passX0, rect.offset.x);
         g_passY0 = std::min(g_passY0, rect.offset.y);
         g_passX1 = std::max(g_passX1, rect.offset.x + int32_t(rect.extent.width));
@@ -4899,6 +4952,8 @@ namespace Renderer
         if (present) Transition(*present, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         EndFrame();
         ++g_frame;
+        g_passLogNow = g_passLogFrames > 0;
+        if (g_passLogFrames) --g_passLogFrames;
         if (g_frame == g_dumpSurfacesFrame)
             DumpAllSurfaces();
         if (g_frame % 300 == 0)
@@ -5026,10 +5081,11 @@ namespace Renderer
                 g_gpuMs[0], g_gpuMs[1], g_gpuMs[2], g_gpuMs[4], g_gpuMs[3], g_passBegins, g_barriers, (unsigned long long)g_tileTransfers, (unsigned long long)g_tilesSkipped, (unsigned long long)g_tilesFilled, (unsigned long long)g_clearDraws, (unsigned long long)g_clearDrawsKnown, (unsigned long long)g_depthClearDrawsKnown, g_rts.size());
             {
                 const PassStats& s = g_passStats;
-                std::printf("[passes] last 120 frames: %llu draws in %u passes (0 draws %u, 1 draw %u, 2-4 %u, 5+ %u) | framebuffer load+store %.1f Mpx, touched by draws %.1f Mpx, attachment loads skipped %.1f Mpx | ended by:",
+                std::printf("[passes] last 120 frames: %llu draws in %u passes (0 draws %u, 1 draw %u, 2-4 %u, 5+ %u) | framebuffer load+store %.1f Mpx, touched by draws %.1f Mpx, attachment loads skipped %.1f Mpx, no-depth draws kept in depth passes %llu | ended by:",
                     (unsigned long long)s.draws, s.byDraws[0] + s.byDraws[1] + s.byDraws[2] + s.byDraws[3], s.byDraws[0], s.byDraws[1], s.byDraws[2], s.byDraws[3],
-                    s.framebufferPixels / 1e6, s.touchedPixels / 1e6, g_discardedLoadPixels / 1e6);
+                    s.framebufferPixels / 1e6, s.touchedPixels / 1e6, g_discardedLoadPixels / 1e6, (unsigned long long)g_depthKeptDraws);
                 g_discardedLoadPixels = 0;
+                g_depthKeptDraws = 0;
                 std::vector<std::pair<uint32_t, std::string>> reasons;
                 for (const auto& [why, n] : s.endReasons) reasons.emplace_back(n, why);
                 std::sort(reasons.rbegin(), reasons.rend());
@@ -5158,6 +5214,10 @@ namespace Renderer
                         }
                         else if (ok && !std::strcmp(cmd, "passes"))
                             g_fullPasses = !std::strcmp(arg, "full");
+                        else if (ok && !std::strcmp(cmd, "depthkeep"))
+                            g_noDepthKeep = !std::strcmp(arg, "off");
+                        else if (ok && !std::strcmp(cmd, "passlog"))
+                            g_passLogFrames = uint32_t(std::max(1, std::atoi(arg)));
                         else if (ok && !std::strcmp(cmd, "resolveskip"))
                             g_noResolveSkip = !std::strcmp(arg, "off");
                         else if (ok && !std::strcmp(cmd, "discardloads"))

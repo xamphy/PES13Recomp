@@ -72,7 +72,9 @@ Format: **title** - symptom. Where / notes. (source / date)
   2026-11-15, iPhone 11 (A13) on build #28: matches 20-30 fps; slow: replays, set pieces, the
   pause menu, the Game Plan screen (log: 11-12 fps, 64-90 ms GPU per frame, some scenes ~130
   one-draw render passes per frame). Normal 3D ~38 ms GPU (draws 28, EDRAM transfers 5). FSR 1
-  costs 2.1 ms per frame.
+  costs 2.1 ms per frame. Build #30 (depth kept in passes): render passes per frame halved, GPU time
+  unchanged - the A13 is limited by the drawing work. Build #31 (implicit-LOD texture sampling):
+  about 10-15% less GPU time in every kind of scene.
 - **4 GB guest reservation needs `extended-virtual-addressing`** - a free Apple ID may drop this
   entitlement. If it does, the session's `logs/pes13 <date> <time>.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
   a paid developer account, or shrink the reservation. (IPAD.md)

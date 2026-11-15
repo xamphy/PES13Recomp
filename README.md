@@ -5,8 +5,8 @@
 </p>
 
 > **Experimental branch - not yet tested on an iPad.** Everything here is newer than iPad build #17.
-> Build #28 has been tested on an **iPhone 11** (see [iPhone 11 test](#iphone-11-test-build-28)),
-> not yet on an iPad - see [What's new on this branch](#whats-new-on-this-branch). The last build
+> Builds #28, #30 and #31 (the current code) have been tested on an **iPhone 11** (see
+> [iPhone 11 tests](#iphone-11-tests-builds-28-30-31)), not yet on an iPad - see [What's new on this branch](#whats-new-on-this-branch). The last build
 > tested on the iPad (build #17) is on the `main` branch.
 
 <p align="center">
@@ -44,10 +44,23 @@ iPad yet**; everything was checked on Windows (screenshots, Vulkan validation, A
 build #28 has been played on an iPhone 11 (results below). Most items can be switched off for
 comparison (see the variables in brackets).
 
-### iPhone 11 test (build #28)
+### iPhone 11 tests (builds #28, #30, #31)
 
 Played on an iPhone 11 (Apple A13 GPU, 4 GB RAM) on 2026-11-15, with touch controls and with a
-Razer Kishi V2 controller.
+Razer Kishi V2 controller. Build #31 is the code on this branch.
+
+| GPU time per frame, by scene weight | #28 | #30 | #31 |
+|---|---|---|---|
+| Light (under 150 draws per frame) | 19.8 ms | 16.3 ms | 14.5 ms |
+| Normal play (150-350 draws) | 36.4 ms | 37.8 ms | 32.1 ms |
+| Heavy (350-550 draws) | 57.3 ms | 52.3 ms | 47.9 ms |
+| Heaviest (550+ draws: replays, cutscenes) | 70.9 ms | 70.6 ms | 60.3 ms |
+
+- **#30** (depth kept in passes) halved the render passes per frame (median 43 -> 22) but barely
+  changed GPU time: the A13 is limited by the drawing work itself, not by pass switches.
+- **#31** (implicit-LOD texture sampling) cut GPU time by about 10-15% in every kind of scene.
+
+Build #28 results:
 - **Works:** the launch menu (settings are saved), the controller (touch controls hide while it is
   connected and come back when it disconnects), matches, menus. No crashes in three play sessions.
 - **Fixed on a device:** the pitch's TV-static shimmer in motion is gone (texture mip levels).
@@ -58,7 +71,8 @@ Razer Kishi V2 controller.
   ~130 one-draw render passes per frame, which tile-based GPUs pay for).
 - **FSR 1** costs about 2.1 ms GPU per frame on the A13 - leave upscaling off on older iPhones.
 - The phone reaches the "serious" thermal state after 10-15 minutes; frame rates barely changed.
-- Next: fewer, larger render passes for the heavy scenes (the iPhone numbers are the benchmark).
+- No crashes or new errors in the #30 and #31 sessions (~30 minutes each).
+- Next: less work per texture fetch in the shader translator (format decoding at run time).
 
 **Fixes**
 - **Texture mip levels.** Textures were created with a single level and sampled at full resolution
@@ -78,9 +92,19 @@ frame), and its tile-based GPU pays for every render pass and every copy between
 - Cleared EDRAM tiles are filled inside the next render pass instead of being copied between
   render targets (the game clears through 4x-MSAA aliases of its targets): about 80% fewer tile
   copies and far fewer split passes in matches. (`PES_NO_CLEAR_FILL=1`)
-- On Windows, a match measured about 22-25% less GPU time with everything on. The iPad gain is
-  still to be measured: the log now splits GPU time on the iPad into draws / resolves / uploads /
-  EDRAM transfers / other.
+- A draw without depth on the scene target stays in the open render pass (keeping its depth
+  attachment, with depth off) instead of starting a new pass - the game alternates depth and
+  no-depth draws, so one half of the main scene went from 6 passes to 1. (`PES_NO_DEPTH_KEEP=1`)
+- **Texture sampling with an implicit LOD.** Xenia's shader translator turns every pixel-shader
+  texture fetch into sampling with explicit gradients, which is slow on Apple GPUs. The same LOD is
+  now passed as a bias to normal sampling - about 10-15% less GPU time on an iPhone 11. The changed
+  translator file is in `runtime/gpu/xenia_patched/` (the Xenia submodule is unchanged).
+  (`PES_GRAD_LOD=1`)
+- On Windows, a match measured about 22-25% less GPU time with the pass changes on. The log splits
+  GPU time on Apple devices into draws / resolves / uploads / EDRAM transfers / other.
+- Restored code that had been lost on this branch (it was in every tested device build): thread
+  QoS on Apple, the Metal timestamp pool limit (GPU timing in the log), and draining the GPU queue
+  when the app goes to the background.
 
 **Upscaling**
 - Optional AMD FidelityFX **FSR 1** (EASU + RCAS) or Snapdragon **SGSR 1** for the final picture,
@@ -100,7 +124,7 @@ frame), and its tile-based GPU pays for every render pass and every copy between
 - When the app goes to the background, the log records what every game thread is doing (helps
   with hangs), and GPU memory allocation failures are logged.
 - iPhone installs are allowed. Tested on an iPhone 11 (A13): playable, 20-30 fps in matches
-  (see [iPhone 11 test](#iphone-11-test-build-28)). The game needs enough memory for its 4 GB
+  (see [iPhone 11 tests](#iphone-11-tests-builds-28-30-31)). The game needs enough memory for its 4 GB
   reservation.
 
 ## Contents

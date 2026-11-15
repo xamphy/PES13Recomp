@@ -32,7 +32,8 @@ add_library(XeniaShader STATIC
     ${XE_GPU}/spirv_shader.cc
     ${XE_GPU}/spirv_shader_translator.cc
     ${XE_GPU}/spirv_shader_translator_alu.cc
-    ${XE_GPU}/spirv_shader_translator_fetch.cc
+    # PES13's copy: implicit-LOD texture sampling in pixel shaders (runtime/gpu/xenia_patched/README.md)
+    ${CMAKE_SOURCE_DIR}/runtime/gpu/xenia_patched/spirv_shader_translator_fetch.cc
     ${XE_GPU}/spirv_shader_translator_memexport.cc
     ${XE_GPU}/spirv_shader_translator_rb.cc
     ${XE_GPU}/xenos.cc
