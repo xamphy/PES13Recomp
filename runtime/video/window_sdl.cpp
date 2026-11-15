@@ -319,6 +319,8 @@ namespace Video
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setstacksize(&attr, 64u << 20);
+        // The game's main thread: highest QoS so iPadOS keeps it on a performance core.
+        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
         pthread_t thread;
         if (pthread_create(&thread, &attr, AppThread, &args) != 0)
         {
