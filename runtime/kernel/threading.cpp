@@ -2,6 +2,7 @@
 #include "kernel.h"
 #include "objects.h"
 #include "thread.h"
+#include "host_qos.h"
 
 #include <guest_memory.h>
 
@@ -40,6 +41,7 @@ GUEST_IMPORT(ExCreateThread)
 
     std::thread([t, xapiStartup, startAddress, startContext]
     {
+        Kernel::SetHostThreadQos(Kernel::HostQos::Initiated); // Apple: prefer performance cores
         {
             std::unique_lock lock(t->suspendMutex);
             t->suspendCv.wait(lock, [t] { return t->suspendCount == 0; });
