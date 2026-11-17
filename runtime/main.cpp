@@ -36,6 +36,14 @@
 #       define NOMINMAX
 #   endif
 #   include <windows.h>
+#else
+#   include <atomic>
+#   include <csignal>
+#   include <exception>
+#   include <dlfcn.h>
+#   include <execinfo.h>
+#   include <pthread.h>
+#   include <signal.h>
 #endif
 
 namespace
@@ -63,6 +71,88 @@ namespace
         }
         std::fprintf(stderr, "\n");
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+#else
+    // Last-chance crash report (macOS/iOS/Linux): signal, fault address, pc as module+offset,
+    // host thread, backtrace. MemoryWatch installs its SIGSEGV/SIGBUS handler later and chains
+    // here for faults it does not own. A jetsam (out-of-memory) kill is SIGKILL and cannot be
+    // caught: a log that just stops without a [crash] line means the OS killed the app.
+    void LogPc(const char* what, uintptr_t pc)
+    {
+        Dl_info dl{};
+        if (pc && dladdr(reinterpret_cast<void*>(pc), &dl) && dl.dli_fname)
+        {
+            const char* name = std::strrchr(dl.dli_fname, '/');
+            std::fprintf(stderr, " %s %s+0x%llX", what, name ? name + 1 : dl.dli_fname,
+                (unsigned long long)(pc - uintptr_t(dl.dli_fbase)));
+            if (dl.dli_sname)
+                std::fprintf(stderr, " (%s+0x%llX)", dl.dli_sname, (unsigned long long)(pc - uintptr_t(dl.dli_saddr)));
+        }
+        else
+            std::fprintf(stderr, " %s 0x%llX", what, (unsigned long long)pc);
+    }
+
+    void PosixCrashHandler(int sig, siginfo_t* info, void* uc)
+    {
+        static std::atomic<int> entered{0};
+        if (entered.fetch_add(1) == 0)
+        {
+            uintptr_t pc = 0, lr = 0;
+#if defined(__APPLE__) && defined(__aarch64__)
+            auto* ctx = static_cast<ucontext_t*>(uc);
+            pc = uintptr_t(ctx->uc_mcontext->__ss.__pc);
+            lr = uintptr_t(ctx->uc_mcontext->__ss.__lr);
+#elif defined(__APPLE__) && defined(__x86_64__)
+            pc = uintptr_t(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__rip);
+#endif
+            char thread[64] = "?";
+            pthread_getname_np(pthread_self(), thread, sizeof(thread));
+            std::fprintf(stderr, "\n[crash] signal %d (%s) on thread \"%s\"%s", sig, strsignal(sig), thread,
+                Kernel::CurrentGuestThread() ? " (guest thread)" : "");
+            if (sig == SIGSEGV || sig == SIGBUS)
+            {
+                const auto addr = uintptr_t(info->si_addr);
+                std::fprintf(stderr, " - access of 0x%llX", (unsigned long long)addr);
+                const auto guestBase = reinterpret_cast<uintptr_t>(Memory::Base());
+                if (guestBase && addr >= guestBase && addr - guestBase < 0x100000000ull)
+                    std::fprintf(stderr, " (guest address 0x%08llX)", (unsigned long long)(addr - guestBase));
+            }
+            LogPc("at", pc);
+            LogPc("lr", lr);
+            std::fprintf(stderr, "\n[crash] backtrace:\n");
+            void* frames[48];
+            const int n = backtrace(frames, 48);
+            for (int i = 0; i < n; ++i)
+            {
+                std::fprintf(stderr, "  #%d", i);
+                LogPc("", uintptr_t(frames[i]));
+                std::fprintf(stderr, "\n");
+            }
+            std::fflush(stderr);
+            std::fflush(stdout);
+        }
+        // Default action: re-raise so the OS still writes its own crash report.
+        signal(sig, SIG_DFL);
+        if (sig == SIGABRT || sig == SIGTRAP || sig == SIGILL || sig == SIGFPE) raise(sig);
+    }
+
+    void InstallPosixCrashLogger()
+    {
+        struct sigaction sa{};
+        sa.sa_sigaction = PosixCrashHandler;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        for (int sig : {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGTRAP, SIGFPE})
+            sigaction(sig, &sa, nullptr);
+        std::set_terminate([] {
+            const char* what = "unknown";
+            try { if (auto e = std::current_exception()) std::rethrow_exception(e); }
+            catch (const std::exception& e) { what = e.what(); }
+            catch (...) {}
+            std::fprintf(stderr, "\n[crash] uncaught C++ exception: %s\n", what);
+            std::fflush(stderr);
+            std::abort();
+        });
     }
 #endif
 
@@ -95,6 +185,8 @@ static int AppMain(int argc, char** argv)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 #ifdef _WIN32
     SetUnhandledExceptionFilter(CrashHandler);
+#else
+    InstallPosixCrashLogger();
 #endif
 
     std::filesystem::path xexPath = "game/xex/default.xex";

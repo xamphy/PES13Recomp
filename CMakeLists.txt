@@ -62,6 +62,15 @@ add_executable(pes13
     runtime/gpu/gpu.cpp
     runtime/gpu/shader_translate.cpp
     runtime/gpu/renderer.cpp
+    runtime/gpu/renderer/vulkan_core.cpp
+    runtime/gpu/renderer/edram.cpp
+    runtime/gpu/renderer/surfaces.cpp
+    runtime/gpu/renderer/textures.cpp
+    runtime/gpu/renderer/pipelines.cpp
+    runtime/gpu/renderer/capture.cpp
+    runtime/gpu/renderer/resolve.cpp
+    runtime/gpu/renderer/draw.cpp
+    runtime/gpu/renderer/post_effects.cpp
     runtime/gpu/memory_watch.cpp
     runtime/gpu/precise_sleep.cpp
     runtime/gpu/d3d_wait.cpp

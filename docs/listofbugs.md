@@ -75,6 +75,10 @@ Format: **title** - symptom. Where / notes. (source / date)
   costs 2.1 ms per frame. Build #30 (depth kept in passes): render passes per frame halved, GPU time
   unchanged - the A13 is limited by the drawing work. Build #31 (implicit-LOD texture sampling):
   about 10-15% less GPU time in every kind of scene.
+- **Stutter from pipeline compiles in every session** - ~330 pipelines are compiled during play in
+  each session (iPhone 11: 17-50 s in total, single windows of 2 s); MoltenVK's pipeline cache keeps
+  the converted MSL, not GPU code, so the cache file does not avoid it. The log's `[gpu] slow batch`
+  lines now say how much of each stall was compiling. Fix idea: pipeline warm-up during intro/menus.
 - **4 GB guest reservation needs `extended-virtual-addressing`** - a free Apple ID may drop this
   entitlement. If it does, the session's `logs/pes13 <date> <time>.err.log` shows `failed to reserve 4 GB guest address space`. Fix:
   a paid developer account, or shrink the reservation. (IPAD.md)
@@ -82,6 +86,9 @@ Format: **title** - symptom. Where / notes. (source / date)
 
 ## Fixed (recent, for reference)
 
+- 2026-11-17 - **200+ `VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart`
+  warnings per session** - MoltenVK printed one for every strip pipeline created with restart off (harmless).
+  Restart is now always on for strips (draws the same; Metal always restarts anyway).
 - 2026-11-14 - **Pitch shimmered like TV static in motion** (user, d82f660): textures had one mip level
   and samplers maxLod 0.25, so distant surfaces were sampled at full resolution. The guest mip chain
   (packed tail included) is now uploaded and sampled with the game's mip filter, level range and

@@ -12,6 +12,7 @@
 #include "perf_overlay_ios.h"
 #include "launcher_ios.h"
 #include "launcher/launcher_core.h"
+#include "debug/process_memory.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -351,6 +352,13 @@ namespace Video
             }
             else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND)
                 SetAppInBackground(false);
+            else if (e->type == SDL_EVENT_LOW_MEMORY)
+            {
+                // iOS warns before a jetsam kill (SIGKILL, no [crash] line): log the footprint.
+                const ProcessMemory::Info pm = ProcessMemory::Get();
+                std::fprintf(stderr, "[mem] iOS memory warning: footprint %.0f MB (peak %.0f), resident %.0f MB\n",
+                    pm.footprint / 1048576.0, pm.footprintPeak / 1048576.0, pm.resident / 1048576.0);
+            }
             return true;
         }, nullptr);
 #endif

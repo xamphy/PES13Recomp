@@ -1,6 +1,7 @@
 // Launch menu, platform-independent part (see launcher_core.h).
 #include "launcher_core.h"
 #include "video/presenter.h"
+#include "gpu/renderer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +38,7 @@ namespace Launcher
             else if (key == "upscale_height") s.upscaleHeight = std::clamp(value, 0, kUpscaleHeightCount - 1);
             else if (key == "perf_overlay") s.perfOverlay = value != 0;
             else if (key == "touch_controls") s.touchControls = value != 0;
+            else if (key == "blur_effects") s.blurEffects = value != 0;
         }
         if (!g_loaded) { g_current = s; g_loaded = true; }
         return s;
@@ -51,15 +53,18 @@ namespace Launcher
             << "upscaler=" << s.upscaler << "\n"
             << "upscale_height=" << s.upscaleHeight << "\n"
             << "perf_overlay=" << (s.perfOverlay ? 1 : 0) << "\n"
-            << "touch_controls=" << (s.touchControls ? 1 : 0) << "\n";
+            << "touch_controls=" << (s.touchControls ? 1 : 0) << "\n"
+            << "blur_effects=" << (s.blurEffects ? 1 : 0) << "\n";
     }
 
     void ApplySettings(const Settings& s)
     {
         Video::SetUpscaler(Video::Upscaler(std::clamp(s.upscaler, 0, kUpscalerCount - 1)));
         Video::SetUpscaleHeight(kUpscaleHeights[std::clamp(s.upscaleHeight, 0, kUpscaleHeightCount - 1)]);
-        std::printf("[launcher] settings: upscaling %s at %s, performance overlay %s, touch controls %s\n",
-            kUpscalerNames[s.upscaler], kUpscaleHeightNames[s.upscaleHeight], s.perfOverlay ? "on" : "off", s.touchControls ? "on" : "off");
+        Renderer::SetBlurEffects(s.blurEffects);
+        std::printf("[launcher] settings: upscaling %s at %s, performance overlay %s, touch controls %s, blur effects %s\n",
+            kUpscalerNames[s.upscaler], kUpscaleHeightNames[s.upscaleHeight], s.perfOverlay ? "on" : "off", s.touchControls ? "on" : "off",
+            s.blurEffects ? "on" : "off");
     }
 
     const Settings& Current()

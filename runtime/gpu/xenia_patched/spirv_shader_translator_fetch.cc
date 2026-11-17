@@ -28,6 +28,17 @@ namespace gpu {
 // ProcessTextureFetchInstruction). PES_GRAD_LOD=1: Xenia's explicit gradients.
 bool g_pes13_implicit_lod = std::getenv("PES_GRAD_LOD") == nullptr;
 
+// PES13: "plain" texture fetches. Bits 49..63 of a pixel shader's modification
+// value (unused by Xenia's PixelShaderModification) mark fetch constants 0..14
+// whose texture is known (from the fetch constant at draw time) to be unsigned
+// in all swizzled components, without gamma and without an exponent bias. Such
+// fetches sample the unsigned binding once, without the runtime signedness
+// branches, the per-component sign switch and the exponent bias.
+constexpr uint32_t kPes13PlainFetchShift = 49;
+constexpr uint32_t kPes13PlainFetchCount = 15;
+// Set while translating one plain fetch (the translator is single-threaded).
+static bool s_pes13_plain_sample = false;
+
 void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     const ParsedVertexFetchInstruction& instr) {
   UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
@@ -1447,7 +1458,21 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         spv::Id const_uint_2 = builder_->makeUintConstant(2);
         spv::Id const_uint_sign_signed =
             builder_->makeUintConstant(uint32_t(xenos::TextureSign::kSigned));
-        {
+        // PES13: plain fetch (see kPes13PlainFetchShift).
+        const bool plain_fetch =
+            is_pixel_shader() && features_.image_view_format_swizzle &&
+            fetch_constant_index < kPes13PlainFetchCount &&
+            ((GetSpirvShaderModification().value >> kPes13PlainFetchShift) >>
+             fetch_constant_index) & 1;
+        if (plain_fetch) {
+          spv::Id const_false = builder_->makeBoolConstant(false);
+          for (uint32_t i = 0; i < 4; ++i) {
+            swizzled_signs[i] = const_uint_0_;
+            result_is_signed[i] = const_false;
+          }
+          is_all_signed = const_false;
+          is_any_signed = const_false;
+        } else {
           uint32_t result_remaining_components = used_result_nonzero_components;
           uint32_t result_component_index;
           while (xe::bit_scan_forward(result_remaining_components,
@@ -1479,9 +1504,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
               is_any_signed = is_component_signed;
             }
           }
-        }
-        spv::Id is_any_unsigned = builder_->createUnaryOp(
-            spv::OpLogicalNot, type_bool_, is_all_signed);
+        }  // PES13: else (not a plain fetch)
+        spv::Id is_any_unsigned =
+            plain_fetch ? builder_->makeBoolConstant(true)
+                        : builder_->createUnaryOp(spv::OpLogicalNot,
+                                                  type_bool_, is_all_signed);
+        s_pes13_plain_sample = plain_fetch;
 
         // Load the fetch constant word 4, needed unconditionally for LOD
         // biasing, for result exponent biasing, and conditionally for stacked
@@ -2112,7 +2140,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         // to gamma-correct.
         spv::Id const_float_2 = builder_->makeFloatConstant(2.0f);
         spv::Id const_float_minus_1 = builder_->makeFloatConstant(-1.0f);
-        {
+        if (plain_fetch) {
+          // PES13: all components unsigned, no gamma, no exponent bias.
+          uint32_t result_remaining_components = used_result_nonzero_components;
+          uint32_t result_component_index;
+          while (xe::bit_scan_forward(result_remaining_components,
+                                      &result_component_index)) {
+            result_remaining_components &=
+                ~(UINT32_C(1) << result_component_index);
+            result[result_component_index] = builder_->createCompositeExtract(
+                sample_result_unsigned, type_float_, result_component_index);
+          }
+        } else {
           uint32_t result_remaining_components = used_result_nonzero_components;
           uint32_t result_component_index;
           while (xe::bit_scan_forward(result_remaining_components,
@@ -2216,8 +2255,10 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           }
         }
 
+        s_pes13_plain_sample = false;
         // Apply the exponent bias from the bits 13:18 of the fetch constant
         // word 4.
+        if (!plain_fetch) {  // PES13: a plain fetch has no exponent bias
         spv::Id result_exponent_bias = builder_->createBinBuiltinCall(
             type_float_, ext_inst_glsl_std_450_, GLSLstd450Ldexp,
             const_float_1_,
@@ -2237,6 +2278,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 result_exponent_bias);
           }
         }
+        }  // PES13: if (!plain_fetch)
       }
     }
   }
@@ -2385,6 +2427,29 @@ void SpirvShaderTranslator::SampleTexture(
     spv::Id is_any_signed, spv::Id& result_unsigned_out,
     spv::Id& result_signed_out, spv::Id lerp_factor,
     spv::Id lerp_first_unsigned, spv::Id lerp_first_signed) {
+  if (s_pes13_plain_sample) {
+    // PES13: plain fetch - only the unsigned binding, no branches.
+    texture_parameters.sampler = builder_->createBinOp(
+        spv::OpSampledImage,
+        builder_->makeSampledImageType(builder_->getTypeId(image_unsigned)),
+        image_unsigned, sampler);
+    spv::Id result = builder_->createTextureCall(
+        spv::NoPrecision, type_float4_, false, false, false, false, false,
+        texture_parameters, image_operands_mask);
+    if (lerp_factor != spv::NoResult && lerp_first_unsigned != spv::NoResult) {
+      // Exactly as in Xenia's path below.
+      spv::Id lerp_difference = builder_->createNoContractionBinOp(
+          spv::OpVectorTimesScalar, type_float4_,
+          builder_->createNoContractionBinOp(spv::OpFSub, type_float4_, result,
+                                             lerp_first_unsigned),
+          lerp_factor);
+      result = builder_->createNoContractionBinOp(spv::OpFAdd, type_float4_,
+                                                  result, lerp_difference);
+    }
+    result_unsigned_out = result;
+    result_signed_out = const_float4_0_;
+    return;
+  }
   for (uint32_t i = 0; i < 2; ++i) {
     SpirvBuilder::IfBuilder sign_if(i ? is_any_signed : is_any_unsigned,
                                     spv::SelectionControlDontFlattenMask,

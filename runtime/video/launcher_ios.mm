@@ -286,6 +286,10 @@ namespace
     overlay.on = _settings.perfOverlay;
     overlay.onTintColor = Accent();
     [overlay addTarget:self action:@selector(overlayChanged:) forControlEvents:UIControlEventValueChanged];
+    UISwitch* blur = [UISwitch new];
+    blur.on = _settings.blurEffects;
+    blur.onTintColor = Accent();
+    [blur addTarget:self action:@selector(blurChanged:) forControlEvents:UIControlEventValueChanged];
 
     UIStackView* content = [[UIStackView alloc] initWithArrangedSubviews:@[
         [self section:@"Display"],
@@ -294,7 +298,8 @@ namespace
         [self section:@"Controls"],
         [self rowWithTitle:@"Touch controls" detail:@"On-screen buttons. Hidden while a controller is connected." control:touch],
         [self section:@"Performance"],
-        [self rowWithTitle:@"Performance overlay" detail:@"FPS, memory, temperature and battery below the picture." control:overlay] ]];
+        [self rowWithTitle:@"Performance overlay" detail:@"FPS, memory, temperature and battery below the picture." control:overlay],
+        [self rowWithTitle:@"Blur effects" detail:@"Glow around stadium lights, blurred background behind the pause menu, soft full-screen filter. Off is faster." control:blur] ]];
     content.axis = UILayoutConstraintAxisVertical;
     content.spacing = 12 * _k;
     for (UIView* v in content.arrangedSubviews)
@@ -355,6 +360,7 @@ namespace
 - (void)upscaleHeightChanged:(UISegmentedControl*)s { _settings.upscaleHeight = int(s.selectedSegmentIndex); Launcher::SaveSettings(_settings); }
 - (void)touchChanged:(UISwitch*)s { _settings.touchControls = s.on; Launcher::SaveSettings(_settings); }
 - (void)overlayChanged:(UISwitch*)s { _settings.perfOverlay = s.on; Launcher::SaveSettings(_settings); }
+- (void)blurChanged:(UISwitch*)s { _settings.blurEffects = s.on; Launcher::SaveSettings(_settings); }
 - (void)backTapped { [self showMain]; }
 
 - (void)playTapped

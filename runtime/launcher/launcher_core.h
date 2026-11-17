@@ -21,6 +21,7 @@ namespace Launcher
         int upscaleHeight = 0;     // index into kUpscaleHeights
         bool perfOverlay = true;   // iPad: performance overlay in the letterbox bar
         bool touchControls = true; // iPad: on-screen controls (hidden while a controller is connected)
+        bool blurEffects = true;   // the game's blur passes (glow, pause-menu blur, soft filter); off = faster
     };
     Settings LoadSettings();       // userdata/launcher.ini (relative to the working directory)
     void SaveSettings(const Settings& s);

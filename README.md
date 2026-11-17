@@ -5,9 +5,10 @@
 </p>
 
 > **Experimental branch - not yet tested on an iPad.** Everything here is newer than iPad build #17.
-> Builds #28, #30 and #31 (the current code) have been tested on an **iPhone 11** (see
-> [iPhone 11 tests](#iphone-11-tests-builds-28-30-31)), not yet on an iPad - see [What's new on this branch](#whats-new-on-this-branch). The last build
-> tested on the iPad (build #17) is on the `main` branch.
+> Builds #28, #30 and #31 have been tested on an **iPhone 11** (see
+> [iPhone 11 tests](#iphone-11-tests-builds-28-30-31)), not yet on an iPad - see [What's new on this branch](#whats-new-on-this-branch).
+> The code here is now **build #38**: the changes since #31 ([builds #32-#38](#builds-32-38-not-yet-tested-on-a-device))
+> are checked on Windows only. The last build tested on the iPad (build #17) is on the `main` branch.
 
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
@@ -43,6 +44,26 @@ Changes since iPad build #17 (the tested build on `main`). **None of this has be
 iPad yet**; everything was checked on Windows (screenshots, Vulkan validation, A/B runs), and
 build #28 has been played on an iPhone 11 (results below). Most items can be switched off for
 comparison (see the variables in brackets).
+
+### Builds #32-#38 (not yet tested on a device)
+
+Checked on Windows (exhibition matches, screenshots, A/B switches); device results to follow.
+- **Blur effects setting** (launch menu, Settings > Performance; default On). Off skips the game's
+  blur passes: the glow around stadium lights (including a second pass over the whole scene's
+  geometry that only feeds it, ~115 draws per frame), the blurred background behind the pause menu
+  and Game Plan (two full-screen 15-tap passes), and a soft full-screen filter.
+  (`PES_POST_OFF=glow,pause,soft` or `all`)
+- **Lazy clears**: clears of whole EDRAM tiles that are drawn over anyway are no longer drawn,
+  also after resolves. (`PES_NO_LAZY_CLEAR=1`)
+- **Plain texture fetches**: fetches from unsigned, unbiased textures skip the run-time format
+  handling in the translated shaders. (`PES_NO_PLAIN_FETCH=1`)
+- **Primitive restart** is always on for strip pipelines (draws the same; Metal cannot turn it
+  off). Removes 200+ MoltenVK warnings per session and halves those pipeline variants.
+- **Logs**: GPU time per kind of render pass (`[passgpu]`); `[gpu] slow batch` lines say how much
+  was pipeline compiling, waiting and the slowest command; the usual long `WAIT_REG_MEM` is
+  labelled as the normal vsync wait. iOS/macOS: a crash logger (signal, fault address, backtrace)
+  and memory-warning lines.
+- The renderer is split into files by area (`runtime/gpu/renderer/`), no behaviour change.
 
 ### iPhone 11 tests (builds #28, #30, #31)
 

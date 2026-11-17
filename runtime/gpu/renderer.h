@@ -37,4 +37,12 @@ namespace Renderer
     // Guest CPU code (XG untile) is about to read resolved memory at guestAddr: store it in the
     // byte order the CPU expects (see renderer.cpp, "CPU view of resolves"). Any thread.
     void PrepareResolveForCpu(uint32_t guestAddr);
+
+    // Launch menu "Blur effects": false = PES' blur passes are not drawn (stadium-light glow,
+    // pause-menu background blur, full-frame soft filter; see renderer/post_effects.cpp).
+    // Any time, any thread. PES_POST_OFF=glow,pause,soft|all overrides it (tests).
+    void SetBlurEffects(bool on);
+
+    // Since start: new pipelines / shader modules created and the time spent creating them (CP thread).
+    void CompileTotals(uint64_t& pipelines, uint64_t& modules, uint64_t& us);
 }

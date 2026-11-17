@@ -61,6 +61,7 @@ namespace
     std::atomic<uint64_t> g_frames{ 0 };
     // CP busy time per frame (wall time between swaps minus WAIT_REG_MEM and idle time), stats.
     uint64_t g_waitUsTotal = 0, g_idleUsTotal = 0; // CP thread only
+    uint64_t g_batchSlowestUs = 0; uint32_t g_batchSlowestOp = 0; // slowest type-3 packet of the current batch
     uint64_t g_busySumUs = 0, g_busyMaxUs = 0, g_busyFrames = 0, g_busyOver = 0;
     std::atomic<uint64_t> g_draws{ 0 };
     std::atomic<uint64_t> g_packets{ 0 };
@@ -493,9 +494,13 @@ namespace
             if (us > 3000)
             {
                 static uint32_t longLogs = 0;
+                // The usual one: Direct3D waiting for the next vblank (scratch slot 1, cleared by
+                // the vblank interrupt) = normal frame pacing while the game is ahead (intro,
+                // loading screens, 60 Hz menus), not a stall.
+                const bool vsync = memory && (d[1] & ~3u) == Gpu::ReadRegister(GpuReg::SCRATCH_ADDR) + 4;
                 if (longLogs++ < 30)
-                    std::fprintf(stderr, "[gpu] long WAIT_REG_MEM %llu us: info 0x%X %s 0x%X ref 0x%X mask 0x%X\n", (unsigned long long)us,
-                        d[0], memory ? "mem" : "reg", d[1], d[2], d[3]);
+                    std::fprintf(stderr, "[gpu] long WAIT_REG_MEM %llu us: info 0x%X %s 0x%X ref 0x%X mask 0x%X%s\n", (unsigned long long)us,
+                        d[0], memory ? "mem" : "reg", d[1], d[2], d[3], vsync ? " (vsync wait: frame pacing, normal)" : "");
             }
             break;
         }
@@ -731,7 +736,16 @@ namespace
                     ++g_predicatedSkips;
                     break; // predicated off for this tile pass
                 }
-                ExecuteType3(opcode, data, depth);
+                if (opcode == PM4_INDIRECT_BUFFER || opcode == PM4_INDIRECT_BUFFER_PFD)
+                    ExecuteType3(opcode, data, depth); // its packets are timed one by one
+                else
+                {
+                    // The slowest packet of the batch (named in the "slow batch" line).
+                    const auto t0 = std::chrono::steady_clock::now();
+                    ExecuteType3(opcode, data, depth);
+                    const uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+                    if (us > g_batchSlowestUs) g_batchSlowestUs = us, g_batchSlowestOp = opcode;
+                }
                 break;
             }
             }
@@ -784,12 +798,25 @@ namespace
                 KickTrace::RecordCpRead(rptr, wptr);
                 Reader ring{ g_ringBase.load(), size, rptr, (wptr + size - rptr) % size, true };
                 const auto batchStart = std::chrono::steady_clock::now();
+                uint64_t pipes0, mods0, compileUs0;
+                Renderer::CompileTotals(pipes0, mods0, compileUs0);
+                const uint64_t waitUs0 = g_waitUsTotal;
+                g_batchSlowestUs = 0, g_batchSlowestOp = 0;
                 ExecuteBuffer(ring, 0);
+                // A command batch that ran > 100 ms: usually new pipelines being compiled (Metal
+                // compiles each one, ~100-150 ms on an A13) or a loading screen's uploads.
                 if (const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - batchStart).count(); ms > 100)
                 {
                     static uint32_t slowLogs = 0;
-                    if (slowLogs++ < 20)
-                        std::fprintf(stderr, "[gpu] slow batch: %u -> %u took %lld ms\n", rptr, wptr, (long long)ms);
+                    uint64_t pipes1, mods1, compileUs1;
+                    Renderer::CompileTotals(pipes1, mods1, compileUs1);
+                    if (slowLogs++ < 40)
+                        std::fprintf(stderr, "[gpu] slow batch: %u -> %u took %lld ms (new pipelines %llu + shaders %llu: %llu ms compiling, %llu ms in WAIT_REG_MEM; slowest packet 0x%02X %s %llu ms)\n",
+                            rptr, wptr, (long long)ms, (unsigned long long)(pipes1 - pipes0), (unsigned long long)(mods1 - mods0),
+                            (unsigned long long)((compileUs1 - compileUs0) / 1000), (unsigned long long)((g_waitUsTotal - waitUs0) / 1000),
+                            g_batchSlowestOp, g_batchSlowestOp == PM4_XE_SWAP ? "(swap: frame end + present)" :
+                            g_batchSlowestOp == PM4_DRAW_INDX || g_batchSlowestOp == PM4_DRAW_INDX_2 ? "(draw)" :
+                            g_batchSlowestOp == PM4_WAIT_REG_MEM ? "(wait)" : "", (unsigned long long)(g_batchSlowestUs / 1000));
                 }
                 rptr = wptr;
                 // (CP_RB_RPTR register not updated: Direct3D reads the read pointer from the

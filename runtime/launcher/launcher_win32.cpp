@@ -26,7 +26,8 @@ namespace
     using namespace Gdiplus;
 
     enum class Page { Main, Settings, About };
-    enum class Action { Play, OpenSettings, OpenAbout, Back, Upscaler, UpscaleHeight };
+    enum class Action { Play, OpenSettings, OpenAbout, Back, Upscaler, UpscaleHeight, BlurEffects };
+    bool IsValueRow(Action a) { return a == Action::Upscaler || a == Action::UpscaleHeight || a == Action::BlurEffects; }
     struct Item { Action action; RectF rect; bool enabled = true; };
 
     struct State
@@ -163,12 +164,16 @@ namespace
             const float rw = std::min(vw - 2 * x, 900.0f);
             g.items.push_back({ Action::Upscaler, RectF(x, 190, rw, 96) });
             g.items.push_back({ Action::UpscaleHeight, RectF(x, 300, rw, 96), g.settings.upscaler != 0 });
+            g.items.push_back({ Action::BlurEffects, RectF(x, 450, rw, 96) });
             g.items.push_back({ Action::Back, RectF(vw - x - 200, 80, 200, 56) });
             SettingRow(gr, 0, L"Upscaling", L"Sharper picture when the window is larger than 1280x720. FSR 1 is the sharpest, "
                 L"SGSR 1 is lighter on the GPU.", Wide(Launcher::kUpscalerNames[g.settings.upscaler]));
             SettingRow(gr, 1, L"Upscaling resolution", L"Size the upscaler renders at before the picture is fitted to the "
                 L"window. Lower sizes cost less GPU time.", Wide(Launcher::kUpscaleHeightNames[g.settings.upscaleHeight]));
-            Button(gr, 2, L"Back", L"←", false);
+            Text(gr, L"PERFORMANCE", x, 420, 14, FontStyleBold, Color(220, 140, 175, 255));
+            SettingRow(gr, 2, L"Blur effects", L"The game's glow around stadium lights, the blurred background behind "
+                L"the pause menu and its soft full-screen filter. Off is faster on slow devices.", g.settings.blurEffects ? L"On" : L"Off");
+            Button(gr, 3, L"Back", L"←", false);
         }
         else
         {
@@ -237,6 +242,9 @@ namespace
         case Action::UpscaleHeight:
             g.settings.upscaleHeight = (g.settings.upscaleHeight + direction + Launcher::kUpscaleHeightCount) % Launcher::kUpscaleHeightCount;
             break;
+        case Action::BlurEffects:
+            g.settings.blurEffects = !g.settings.blurEffects;
+            break;
         }
         Launcher::SaveSettings(g.settings);
         Redraw();
@@ -259,8 +267,8 @@ namespace
         {
         case VK_UP: move(-1); break;
         case VK_DOWN: case VK_TAB: move(1); break;
-        case VK_LEFT: if (g.items[g.focus].action == Action::Upscaler || g.items[g.focus].action == Action::UpscaleHeight) Activate(g.focus, -1); break;
-        case VK_RIGHT: if (g.items[g.focus].action == Action::Upscaler || g.items[g.focus].action == Action::UpscaleHeight) Activate(g.focus, 1); break;
+        case VK_LEFT: if (IsValueRow(g.items[g.focus].action)) Activate(g.focus, -1); break;
+        case VK_RIGHT: if (IsValueRow(g.items[g.focus].action)) Activate(g.focus, 1); break;
         case VK_RETURN: case VK_SPACE: Activate(g.focus); break;
         case VK_ESCAPE: case VK_BACK:
             if (g.page != Page::Main) { Launcher::SaveSettings(g.settings); Open(Page::Main); }
@@ -336,7 +344,7 @@ namespace
         case WM_RBUTTONUP:
         {
             const int hit = HitTest(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-            if (hit >= 0 && (g.items[hit].action == Action::Upscaler || g.items[hit].action == Action::UpscaleHeight)) Activate(hit, -1);
+            if (hit >= 0 && IsValueRow(g.items[hit].action)) Activate(hit, -1);
             return 0;
         }
         case WM_KEYDOWN: Key(wp); return 0;
