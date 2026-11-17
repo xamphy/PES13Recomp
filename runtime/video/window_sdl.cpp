@@ -12,12 +12,26 @@
 #include "perf_overlay_ios.h"
 #include "launcher_ios.h"
 #include "launcher/launcher_core.h"
+#if defined(__ANDROID__)
+#   include "android_bridge.h"
+#endif
 #include "debug/process_memory.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
-#include <TargetConditionals.h>
+#if defined(__APPLE__)
+#   include <TargetConditionals.h>
+#else
+#   define TARGET_OS_IOS 0
+#endif
+// Phone/tablet session rules (fixed data folder, per-session log files, always --run, GPU paused
+// in the background): iPadOS/iOS and Android.
+#if TARGET_OS_IOS || defined(__ANDROID__)
+#   define PES_MOBILE 1
+#else
+#   define PES_MOBILE 0
+#endif
 #include <pthread.h>
 #include <unistd.h>
 
@@ -38,6 +52,7 @@ namespace
 {
     SDL_Window* g_window = nullptr;
     std::atomic<bool> g_focus{ false };
+    std::atomic<uint64_t> g_pixelSize{ 0 }; // width << 32 | height, from create / resize events
 
     // Controllers (SDL gamepads: Xbox, PlayStation, MFi, ...), opened and read on the main thread
     // (event loop); the game thread reads the snapshots.
@@ -146,6 +161,10 @@ namespace
         const AppArgs* a = static_cast<const AppArgs*>(p);
 #if TARGET_OS_IOS
         Video::Apple::RunLauncher(); // launch menu first (settings, Start)
+#elif defined(__ANDROID__)
+        // The launch menu (LauncherActivity) ran before this activity and saved userdata/launcher.ini.
+        Launcher::SetCurrent(Launcher::LoadSettings());
+        Launcher::ApplySettings(Launcher::Current());
 #endif
         const int code = a->appMain(a->argc, a->argv);
         std::fflush(stdout);
@@ -177,6 +196,8 @@ namespace Video::Window
             // SDL's view controller hides the status bar (clock, battery) only for borderless or
             // fullscreen windows; the window already covers the whole screen on iPad.
             flags |= SDL_WINDOW_BORDERLESS;
+#elif defined(__ANDROID__)
+            flags |= SDL_WINDOW_FULLSCREEN; // immersive: no status / navigation bar over the picture
 #endif
             g_window = SDL_CreateWindow(title, int(width), int(height), flags);
             if (!g_window)
@@ -189,6 +210,7 @@ namespace Video::Window
                 SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
                 SDL_GetWindowSize(g_window, &ww, &wh);
                 std::printf("[video] window %dx%d points, %dx%d pixels\n", ww, wh, pw, ph);
+                g_pixelSize = (uint64_t(uint32_t(pw)) << 32) | uint32_t(ph);
             }
             g_focus = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
 #if TARGET_OS_IOS
@@ -233,6 +255,14 @@ namespace Video::Window
 
     bool HasFocus() { return g_focus; }
 
+    bool PixelSize(uint32_t& width, uint32_t& height)
+    {
+        const uint64_t s = g_pixelSize.load();
+        width = uint32_t(s >> 32);
+        height = uint32_t(s);
+        return width && height;
+    }
+
     void SetTitle(const std::string& title)
     {
         if (!g_window)
@@ -265,6 +295,8 @@ namespace Video
         HostPad p;
 #if TARGET_OS_IOS
         p = Apple::GetTouchPad(); // on-screen controls; keyboard keys below add to it
+#elif defined(__ANDROID__)
+        p = Android::GetTouchPad();
 #endif
         if (!g_focus) return p;
         int count = 0;
@@ -274,7 +306,8 @@ namespace Video
             { SDL_SCANCODE_UP, 0x0001 }, { SDL_SCANCODE_DOWN, 0x0002 }, { SDL_SCANCODE_LEFT, 0x0004 }, { SDL_SCANCODE_RIGHT, 0x0008 },
             { SDL_SCANCODE_RETURN, 0x0010 }, { SDL_SCANCODE_BACKSPACE, 0x0020 }, { SDL_SCANCODE_SPACE, 0x1000 },
             { SDL_SCANCODE_ESCAPE, 0x2000 }, { SDL_SCANCODE_C, 0x4000 }, { SDL_SCANCODE_V, 0x8000 },
-            { SDL_SCANCODE_Q, 0x0100 }, { SDL_SCANCODE_E, 0x0200 } };
+            { SDL_SCANCODE_Q, 0x0100 }, { SDL_SCANCODE_E, 0x0200 },
+            { SDL_SCANCODE_AC_BACK, 0x2000 } }; // Android back button / gesture = B
         for (const auto& m : map)
             if (key(m.s)) p.buttons |= m.bit;
         auto keyAxis = [&](int16_t& v, SDL_Scancode pos, SDL_Scancode neg)
@@ -298,13 +331,21 @@ namespace Video
             return appMain(argc, argv);
         }
 
-#if TARGET_OS_IOS
+#if PES_MOBILE
         // iPadOS: no command line and no console. Work in the app's Documents folder (visible in the
-        // Files app: copy game/xex and game/files there), always run. Every session logs to its own
+        // Files app: copy game/xex and game/files there), always run. Android: the app's external
+        // files folder, Android/data/<package>/files (reachable over USB / a file manager). Every session logs to its own
         // pair of files, Documents/logs/pes13 <date> <time>.log / .err.log, so nothing is overwritten
         // when the app is restarted; the newest kLogSessions sessions are kept.
+#   if defined(__ANDROID__)
+        if (const char* docs = SDL_GetAndroidExternalStoragePath())
+            chdir(docs);
+        else
+            std::fprintf(stderr, "[video] no external storage path: %s\n", SDL_GetError());
+#   else
         if (const char* docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS))
             chdir(docs);
+#   endif
         {
             constexpr size_t kLogSessions = 10;
             std::error_code ec;
@@ -338,7 +379,7 @@ namespace Video
         argc = int(iosArgv.size()) - 1;
         argv = iosArgv.data();
 #endif
-#if TARGET_OS_IOS
+#if PES_MOBILE
         // GPU work is not allowed in the background (Metal loses the device). These app events are
         // delivered synchronously from UIKit, so they need an event watch, not the queue below.
         SDL_AddEventWatch([](void*, SDL_Event* e) -> bool
@@ -354,9 +395,9 @@ namespace Video
                 SetAppInBackground(false);
             else if (e->type == SDL_EVENT_LOW_MEMORY)
             {
-                // iOS warns before a jetsam kill (SIGKILL, no [crash] line): log the footprint.
+                // The OS warns before an out-of-memory kill (SIGKILL, no [crash] line): log the footprint.
                 const ProcessMemory::Info pm = ProcessMemory::Get();
-                std::fprintf(stderr, "[mem] iOS memory warning: footprint %.0f MB (peak %.0f), resident %.0f MB\n",
+                std::fprintf(stderr, "[mem] OS memory warning: footprint %.0f MB (peak %.0f), resident %.0f MB\n",
                     pm.footprint / 1048576.0, pm.footprintPeak / 1048576.0, pm.resident / 1048576.0);
             }
             return true;
@@ -368,8 +409,10 @@ namespace Video
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setstacksize(&attr, 64u << 20);
+#if defined(__APPLE__)
         // The game's main thread: highest QoS so iPadOS keeps it on a performance core.
         pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
         pthread_t thread;
         if (pthread_create(&thread, &attr, AppThread, &args) != 0)
         {
@@ -394,6 +437,13 @@ namespace Video
                 std::_Exit(0);
             case SDL_EVENT_WINDOW_FOCUS_GAINED: g_focus = true; break;
             case SDL_EVENT_WINDOW_FOCUS_LOST:   g_focus = false; break;
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                if (e.window.data1 > 0 && e.window.data2 > 0)
+                {
+                    g_pixelSize = (uint64_t(uint32_t(e.window.data1)) << 32) | uint32_t(e.window.data2);
+                    std::printf("[video] window resized to %dx%d pixels\n", e.window.data1, e.window.data2);
+                }
+                break;
             case SDL_EVENT_GAMEPAD_ADDED:
             case SDL_EVENT_GAMEPAD_REMOVED:
             case SDL_EVENT_GAMEPAD_AXIS_MOTION:
@@ -415,27 +465,32 @@ namespace Video
         std::condition_variable cv;
         bool answered = false, accepted = false, shown = false;
         std::u16string answer;
+        auto done = [&](bool ok, std::u16string result)
+        {
+            std::lock_guard lock(m);
+            accepted = ok;
+            answer = std::move(result);
+            answered = true;
+            cv.notify_all();
+        };
         OnMainThread([&]
         {
+#if defined(__ANDROID__)
+            shown = Android::ShowTextPrompt(title, description, text, maxChars, done); // AlertDialog
+#else
             void* native = nullptr;
             if (g_window)
             {
                 const SDL_PropertiesID props = SDL_GetWindowProperties(g_window);
-#if TARGET_OS_IOS
+#   if TARGET_OS_IOS
                 native = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
-#else
+#   else
                 native = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
-#endif
+#   endif
             }
             if (!native) return;
-            shown = Apple::ShowTextPrompt(native, title, description, text, maxChars, [&](bool ok, std::u16string result)
-            {
-                std::lock_guard lock(m);
-                accepted = ok;
-                answer = std::move(result);
-                answered = true;
-                cv.notify_all();
-            });
+            shown = Apple::ShowTextPrompt(native, title, description, text, maxChars, done);
+#endif
         });
         if (!shown)
         {

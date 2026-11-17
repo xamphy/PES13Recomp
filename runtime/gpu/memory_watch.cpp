@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <vector>
 
@@ -32,9 +33,9 @@
 
 namespace
 {
-    // Tracking granularity = host page size: 4 KB on Windows/x64, 16 KB on Apple Silicon
-    // (mprotect works on whole host pages).
-#if defined(__APPLE__) && defined(__aarch64__)
+    // Tracking granularity >= host page size (mprotect works on whole host pages): 4 KB on
+    // Windows/x64, 16 KB on arm64 (Apple Silicon; Android phones use 4 KB or, newer ones, 16 KB).
+#if defined(__aarch64__)
     constexpr uint32_t kPageShift = 14;
 #else
     constexpr uint32_t kPageShift = 12;
@@ -274,7 +275,25 @@ namespace
         return (ctx->uc_mcontext->__es.__err & 2) != 0;           // page-fault error code: W
 #elif defined(__linux__) && defined(__aarch64__)
         pc = uintptr_t(ctx->uc_mcontext.pc);
-        return true; // ESR is in a reserved-space record; treat as a write (only protected pages are handled)
+        // The kernel stores ESR_EL1 in an esr_context record inside __reserved: walk the records
+        // ({u32 magic, u32 size}, ended by magic 0). No record = assume a write.
+        const uint8_t* rec = reinterpret_cast<const uint8_t*>(ctx->uc_mcontext.__reserved);
+        const uint8_t* const recEnd = rec + sizeof(ctx->uc_mcontext.__reserved);
+        while (rec + 8 <= recEnd)
+        {
+            uint32_t magic, size;
+            std::memcpy(&magic, rec, 4);
+            std::memcpy(&size, rec + 4, 4);
+            if (magic == 0 || size < 8) break;
+            if (magic == 0x45535201u && size >= 16) // ESR_MAGIC
+            {
+                uint64_t esr;
+                std::memcpy(&esr, rec + 8, 8);
+                return (esr & (1u << 6)) != 0; // WnR
+            }
+            rec += size;
+        }
+        return true;
 #elif defined(__linux__) && defined(__x86_64__)
         pc = uintptr_t(ctx->uc_mcontext.gregs[REG_RIP]);
         return (ctx->uc_mcontext.gregs[REG_ERR] & 2) != 0;

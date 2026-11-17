@@ -7,6 +7,8 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# No C++20 modules here: skip CMake's dependency scan (it fails on SDL's Android hidapi sources).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 # Must match XenonRecomp's setting, since we link its XenonUtils library.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -48,7 +50,7 @@ set_target_properties(PES13Recomp PROPERTIES JOB_POOL_COMPILE recomp)
 # ---------------------------------------------------------------------------
 # Runtime (hand-written: kernel/XAM, memory, later GPU/audio/input/fs)
 # ---------------------------------------------------------------------------
-add_executable(pes13
+set(PES13_RUNTIME_SOURCES
     runtime/main.cpp
     runtime/audio/xaudio_imports.cpp
     runtime/debug/call_counter.cpp
@@ -94,10 +96,27 @@ add_executable(pes13
     runtime/video/presenter.cpp
     runtime/launcher/launcher_core.cpp
 )
+if (ANDROID)
+    # Android: SDLActivity (Java) loads libmain.so and calls SDL_main (see android/).
+    add_library(pes13 SHARED ${PES13_RUNTIME_SOURCES})
+    set_target_properties(pes13 PROPERTIES OUTPUT_NAME main)
+else()
+    add_executable(pes13 ${PES13_RUNTIME_SOURCES})
+endif()
 # Window behind the presenter: Win32 on Windows; SDL3 on Apple (thirdparty/SDL, zlib license),
 # where the window and event loop must own the main thread. SDL is not used on Windows.
 if (WIN32)
     target_sources(pes13 PRIVATE runtime/video/window_win32.cpp runtime/launcher/launcher_win32.cpp)
+elseif (ANDROID)
+    # Android: SDL3 window/events/gamepads (SDLActivity), Vulkan from the system libvulkan.so.
+    target_sources(pes13 PRIVATE runtime/video/window_sdl.cpp runtime/video/android_bridge.cpp)
+    target_link_libraries(pes13 PRIVATE android log)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory(thirdparty/SDL EXCLUDE_FROM_ALL)
+    target_link_libraries(pes13 PRIVATE SDL3::SDL3-static)
 else()
     target_sources(pes13 PRIVATE runtime/video/window_sdl.cpp runtime/video/prompt_apple.mm)
     # Native text prompt (UIKit / AppKit): Objective-C++ with ARC, built by the C++ compiler.

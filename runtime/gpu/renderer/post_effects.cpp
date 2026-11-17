@@ -22,6 +22,11 @@ namespace RendererImpl
 {
     namespace
     {
+        // Producers stay on until this frame once another draw sampled their output (the replay
+        // intro's shader ..a18a reads the glow chain's 0x03600000 - skipping left it stale/blurry).
+        uint64_t g_producersNeededUntil = 0;
+        constexpr uint64_t kProducerHoldFrames = 120; // 2 s after the last such sample
+
         struct PostDraw { uint64_t ps; PostEffect effect; bool producer; bool singleSampleOnly; };
         constexpr PostDraw kPostDraws[] = {
             { 0x46366866ce4a4af2ull, PostEffect::Glow, false, false }, // composite: + glow levels + flare layer
@@ -56,6 +61,12 @@ namespace RendererImpl
             if (d.ps == psHash && (g_postOff & (1u << uint32_t(d.effect))))
             {
                 if (d.singleSampleOnly && rt->msaa != xenos::MsaaSamples::k1X) break; // not the pre-pass target
+                if (d.producer && g_frame < g_producersNeededUntil)
+                {
+                    // Another effect reads it: draw, but keep the mark so its samples keep the hold alive.
+                    rt->postSkipped = true;
+                    return false;
+                }
                 ++g_postSkippedDraws[uint32_t(d.effect)];
                 if (d.producer) rt->postSkipped = true; // a skipped composite leaves its target as it was
                 return true;
@@ -67,7 +78,14 @@ namespace RendererImpl
     void NotePostSkippedSample(const Surface* s)
     {
         static std::set<uint64_t> logged;
-        if (s->postSkipped && g_postOff && logged.insert(g_postDrawPs).second)
+        if (!s->postSkipped || !g_postOff) return;
+        // Someone besides the glow composite needs the producers' output: keep them running for a
+        // while (this frame's sample is stale once; the next frames get real data).
+        if (g_frame >= g_producersNeededUntil)
+            std::printf("[post] producers kept on: pixel shader %016llx samples their surface 0x%08X\n",
+                (unsigned long long)g_postDrawPs, s->base);
+        g_producersNeededUntil = g_frame + kProducerHoldFrames;
+        if (logged.insert(g_postDrawPs).second)
             std::fprintf(stderr, "[post] pixel shader %016llx samples a skipped surface 0x%08X (its producer was turned off)\n",
                 (unsigned long long)g_postDrawPs, s->base);
     }

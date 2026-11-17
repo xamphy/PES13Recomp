@@ -12,6 +12,9 @@
 #   pragma comment(lib, "psapi.lib")
 #elif defined(__APPLE__)
 #   include <mach/mach.h>
+#elif defined(__linux__)
+#   include <cstdio>
+#   include <cstring>
 #endif
 
 namespace ProcessMemory
@@ -38,6 +41,31 @@ namespace ProcessMemory
             info.footprintPeak = vm.ledger_phys_footprint_peak;
             info.resident = vm.resident_size;
             info.residentPeak = vm.resident_size_peak;
+        }
+#elif defined(__linux__)
+        // Linux / Android: /proc/self/status. Footprint = anonymous resident + swapped (what the
+        // Android low-memory killer weighs; GPU memory is not included), resident = VmRSS.
+        if (FILE* f = std::fopen("/proc/self/status", "r"))
+        {
+            char line[256];
+            uint64_t anon = 0, swap = 0;
+            auto field = [&](const char* name, uint64_t& out) {
+                const size_t n = std::strlen(name);
+                unsigned long long kb;
+                if (std::strncmp(line, name, n) == 0 && std::sscanf(line + n, " %llu", &kb) == 1) out = kb * 1024;
+            };
+            while (std::fgets(line, sizeof(line), f))
+            {
+                field("VmRSS:", info.resident);
+                field("VmHWM:", info.residentPeak);
+                field("RssAnon:", anon);
+                field("VmSwap:", swap);
+            }
+            std::fclose(f);
+            info.footprint = anon + swap;
+            static uint64_t peak = 0;
+            if (info.footprint > peak) peak = info.footprint;
+            info.footprintPeak = peak;
         }
 #endif
         return info;

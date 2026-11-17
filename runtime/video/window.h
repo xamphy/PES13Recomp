@@ -20,5 +20,8 @@ namespace Video::Window
     VkSurfaceKHR CreateSurface(VkInstance instance);
 
     bool HasFocus();
+    // SDL platforms: the window's size in pixels as last reported (create / resize events); false
+    // if unknown. Android sizes its swapchain from it (the driver's surface size can't be trusted).
+    bool PixelSize(uint32_t& width, uint32_t& height);
     void SetTitle(const std::string& title);
 }

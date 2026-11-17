@@ -38,6 +38,18 @@
 > controller; set pieces, cutscenes and the Game Plan screen still drop to 10-25 fps.
 
 
+## Android (early) - this branch
+
+This branch (`android-early`) adds **Android**: one arm64 APK for every GPU (Vulkan 1.1, Android 9+),
+with the launch menu, touch controls, performance overlay and Blur effects setting from the iPad build.
+Played on a Huawei MatePad 11.5 (Snapdragon 7 Gen 1 / Adreno 644) with a PS4 controller and with touch:
+menus at 60 fps, matches about 27 fps. Other devices are untested. Build and install:
+**[docs/ANDROID.md](docs/ANDROID.md)**.
+
+Also on this branch (all platforms, not yet confirmed on a device): with Blur effects off, the replay
+intro turned blurry because it reads the glow chain's output; that output now keeps being drawn while
+something reads it.
+
 ## What's new on this branch
 
 Changes since iPad build #17 (the tested build on `main`). **None of this has been confirmed on an

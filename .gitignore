@@ -24,3 +24,13 @@ build/
 # Runtime user data (saves, cache partition)
 userdata/
 
+
+# Android build output
+android/.gradle/
+android/app/build/
+android/build/
+android/app/libs/
+android/local.properties
+*.apk
+*.jks
+*.p12

@@ -1,0 +1,34 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = "com.xamphy.pes13"
+    compileSdkVersion 35
+    defaultConfig {
+        applicationId "com.xamphy.pes13"
+        minSdkVersion 28          // Android 9: Vulkan 1.1 on practically every device that has it
+        targetSdkVersion 35
+        versionCode 1
+        versionName "0.1-early"
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Signed with the debug key so the APK installs directly (no store, no re-signing).
+            signingConfig signingConfigs.debug
+        }
+    }
+    sourceSets.main {
+        jniLibs.srcDir 'libs'
+        // SDL's Java side (SDLActivity, input, audio) straight from the SDL submodule.
+        java.srcDirs += ['../../thirdparty/SDL/android-project/app/src/main/java']
+    }
+    packagingOptions {
+        jniLibs { useLegacyPackaging = true } // extract libmain.so (large; mmap from the APK is not needed)
+    }
+    lint {
+        abortOnError = false
+    }
+}

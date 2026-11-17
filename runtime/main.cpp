@@ -41,7 +41,11 @@
 #   include <csignal>
 #   include <exception>
 #   include <dlfcn.h>
-#   include <execinfo.h>
+#   if defined(__ANDROID__)
+#       include <unwind.h> // no execinfo backtrace() before Android 13
+#   else
+#       include <execinfo.h>
+#   endif
 #   include <pthread.h>
 #   include <signal.h>
 #endif
@@ -77,6 +81,20 @@ namespace
     // host thread, backtrace. MemoryWatch installs its SIGSEGV/SIGBUS handler later and chains
     // here for faults it does not own. A jetsam (out-of-memory) kill is SIGKILL and cannot be
     // caught: a log that just stops without a [crash] line means the OS killed the app.
+#if defined(__ANDROID__)
+    int backtrace(void** frames, int max)
+    {
+        struct State { void** frames; int n, max; } st{ frames, 0, max };
+        _Unwind_Backtrace([](_Unwind_Context* c, void* arg) -> _Unwind_Reason_Code {
+            auto* s = static_cast<State*>(arg);
+            if (s->n >= s->max) return _URC_END_OF_STACK;
+            if (const uintptr_t ip = _Unwind_GetIP(c)) s->frames[s->n++] = reinterpret_cast<void*>(ip);
+            return _URC_NO_REASON;
+        }, &st);
+        return st.n;
+    }
+#endif
+
     void LogPc(const char* what, uintptr_t pc)
     {
         Dl_info dl{};
@@ -104,6 +122,12 @@ namespace
             lr = uintptr_t(ctx->uc_mcontext->__ss.__lr);
 #elif defined(__APPLE__) && defined(__x86_64__)
             pc = uintptr_t(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__rip);
+#elif defined(__linux__) && defined(__aarch64__)
+            auto* ctx = static_cast<ucontext_t*>(uc);
+            pc = uintptr_t(ctx->uc_mcontext.pc);
+            lr = uintptr_t(ctx->uc_mcontext.regs[30]);
+#elif defined(__linux__) && defined(__x86_64__)
+            pc = uintptr_t(static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]);
 #endif
             char thread[64] = "?";
             pthread_getname_np(pthread_self(), thread, sizeof(thread));
@@ -361,6 +385,8 @@ static int AppMain(int argc, char** argv)
 #   if TARGET_OS_IOS
 #       include <SDL3/SDL_main.h> // iPadOS: SDL starts UIKit and calls main from its app delegate
 #   endif
+#elif defined(__ANDROID__)
+#   include <SDL3/SDL_main.h> // Android: main becomes SDL_main, called by SDLActivity's thread
 #endif
 
 // Windows: AppMain runs right here. Apple: the main thread runs the window event loop (SDL) and

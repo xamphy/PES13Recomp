@@ -18,6 +18,10 @@
 #   include <unistd.h>
 #   ifdef __APPLE__
 #       include <mach/mach.h>
+#   elif defined(__ANDROID__)
+#       include <android/sharedmem.h>
+#   elif defined(__linux__)
+#       include <sys/syscall.h>
 #   endif
 #endif
 
@@ -123,6 +127,28 @@ namespace Memory
             if (kr != KERN_SUCCESS)
             {
                 std::fprintf(stderr, "[memory] physical view setup failed (kern_return %d)\n", int(kr));
+                munmap(g_base, GuestSpaceSize);
+                g_base = nullptr;
+            }
+        }
+#   elif defined(__linux__)
+        // Linux / Android: one 512 MB shared-memory object (pages allocated on first touch) mapped
+        // MAP_SHARED | MAP_FIXED at all three physical views, so they alias like the Windows section.
+        if (g_base)
+        {
+#       ifdef __ANDROID__
+            int fd = ASharedMemory_create("pes13-physical", PhysicalViewSize);
+#       else
+            int fd = int(syscall(SYS_memfd_create, "pes13-physical", 0));
+            if (fd >= 0 && ftruncate(fd, off_t(PhysicalViewSize)) != 0) { close(fd); fd = -1; }
+#       endif
+            bool ok = fd >= 0;
+            for (uint64_t view : { 0xA0000000ull, 0xC0000000ull, 0xE0000000ull })
+                ok = ok && mmap(g_base + view, PhysicalViewSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) != MAP_FAILED;
+            if (fd >= 0) close(fd); // the mappings keep the object alive
+            if (!ok)
+            {
+                std::fprintf(stderr, "[memory] physical view setup failed (fd %d)\n", fd);
                 munmap(g_base, GuestSpaceSize);
                 g_base = nullptr;
             }

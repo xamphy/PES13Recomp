@@ -35,6 +35,7 @@ namespace
     VkSwapchainKHR g_swapchain = VK_NULL_HANDLE;
     VkFormat g_swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
     VkExtent2D g_swapExtent{};
+    VkSurfaceTransformFlagBitsKHR g_swapSurfaceTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR; // display rotation at creation
     std::vector<VkImage> g_swapImages;
 
     VkCommandPool g_cmdPool = VK_NULL_HANDLE;
@@ -100,6 +101,29 @@ namespace
 
         g_swapFormat = chosen.format;
         g_swapExtent = caps.currentExtent;
+        g_swapSurfaceTransform = caps.currentTransform;
+        VkSurfaceTransformFlagBitsKHR preTransform = caps.currentTransform;
+#ifdef __ANDROID__
+        // Android reports a display rotation. Drawing with it as pre-transform would need rotated
+        // output, so ask for none (identity) and let the compositor rotate. The images must then
+        // have the window's size as the user sees it. The reported surface size can't be used for
+        // that: per spec it is in the panel's native orientation, but drivers differ (Huawei's
+        // Adreno 644 reports 2200x1395 landscape with a 90-degree rotation) - so take the size
+        // SDL reports for the window, which is always as seen on screen.
+        {
+            uint32_t w = 0, h = 0;
+            if (Video::Window::PixelSize(w, h))
+                g_swapExtent = { std::clamp(w, caps.minImageExtent.width, std::max(caps.maxImageExtent.width, w)),
+                                 std::clamp(h, caps.minImageExtent.height, std::max(caps.maxImageExtent.height, h)) };
+            else if (caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR))
+                std::swap(g_swapExtent.width, g_swapExtent.height);
+        }
+        if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+            preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+#endif
+        std::printf("[video] swapchain %ux%u (surface %ux%u, display transform 0x%X, pre-transform 0x%X)\n",
+            g_swapExtent.width, g_swapExtent.height, caps.currentExtent.width, caps.currentExtent.height,
+            unsigned(caps.currentTransform), unsigned(preTransform));
 
         VkSwapchainCreateInfoKHR ci{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
         ci.surface = g_surface;
@@ -110,7 +134,7 @@ namespace
         ci.imageArrayLayers = 1;
         ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ci.preTransform = caps.currentTransform;
+        ci.preTransform = preTransform;
         ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         ci.presentMode = VK_PRESENT_MODE_FIFO_KHR; // vsync: also paces the game to the display
         ci.clipped = VK_TRUE;
@@ -124,6 +148,24 @@ namespace
         VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         for (auto& s : g_rendered) vkCreateSemaphore(g_device, &si, nullptr, &s);
         return true;
+    }
+
+    // After a present: must the swapchain be recreated? Android reports SUBOPTIMAL on every present
+    // while the display is rotated (our identity pre-transform differs from the display's), so
+    // there only a real change of rotation or size counts.
+    bool SwapchainStale(VkResult r)
+    {
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) return true;
+        if (r != VK_SUBOPTIMAL_KHR) return false;
+#ifdef __ANDROID__
+        VkSurfaceCapabilitiesKHR caps;
+        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_physical, g_surface, &caps) != VK_SUCCESS) return true;
+        uint32_t w = 0, h = 0;
+        const bool resized = Video::Window::PixelSize(w, h) && (w != g_swapExtent.width || h != g_swapExtent.height);
+        return resized || caps.currentTransform != g_swapSurfaceTransform;
+#else
+        return true;
+#endif
     }
 
     // ------------------------------------------------------------------ upload
@@ -724,6 +766,19 @@ namespace Video
         std::mutex g_backgroundMutex;
         std::condition_variable g_backgroundCv;
         std::atomic<bool> g_background{ false };
+        // Android destroys the window's native surface when the app goes to the background: the
+        // VkSurfaceKHR (and swapchain) must be recreated before the next present.
+        std::atomic<bool> g_recreateSurface{ false };
+
+        bool RecreateSurface()
+        {
+            vkDeviceWaitIdle(g_device);
+            DestroySwapchain();
+            if (g_surface) vkDestroySurfaceKHR(g_instance, g_surface, nullptr);
+            g_surface = Window::CreateSurface(g_instance);
+            std::printf("[video] window surface recreated%s\n", g_surface ? "" : " - FAILED");
+            return g_surface != VK_NULL_HANDLE;
+        }
     }
 
     void SetAppInBackground(bool background)
@@ -744,6 +799,9 @@ namespace Video
         }
         else
         {
+#ifdef __ANDROID__
+            g_recreateSurface = true;
+#endif
             g_backgroundCv.notify_all();
             std::printf("[video] app in foreground - GPU work resumed\n");
         }
@@ -790,6 +848,8 @@ namespace Video
             g_perf.frameWidth = width;
             g_perf.frameHeight = height;
         }
+        if (g_recreateSurface.exchange(false) && !RecreateSurface())
+            return;
         if (!g_swapchain)
         {
             vkDeviceWaitIdle(g_device);
@@ -799,6 +859,11 @@ namespace Video
         vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX);
         uint32_t imageIndex = 0;
         VkResult r = vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &imageIndex);
+        if (r == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            g_recreateSurface = true;
+            return;
+        }
         if (r == VK_ERROR_OUT_OF_DATE_KHR)
         {
             vkDeviceWaitIdle(g_device);
@@ -832,7 +897,8 @@ namespace Video
         present.pSwapchains = &g_swapchain;
         present.pImageIndices = &imageIndex;
         r = vkQueuePresentKHR(g_queue, &present);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
+        if (r == VK_ERROR_SURFACE_LOST_KHR) g_recreateSurface = true;
+        if (SwapchainStale(r))
         {
             vkDeviceWaitIdle(g_device);
             DestroySwapchain();
@@ -864,6 +930,8 @@ namespace Video
         if (!g_device || width == 0 || height == 0)
             return;
 
+        if (g_recreateSurface.exchange(false) && !RecreateSurface())
+            return;
         if (!g_swapchain)
         {
             vkDeviceWaitIdle(g_device);
@@ -881,6 +949,11 @@ namespace Video
 
         uint32_t imageIndex = 0;
         VkResult r = vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &imageIndex);
+        if (r == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            g_recreateSurface = true;
+            return;
+        }
         if (r == VK_ERROR_OUT_OF_DATE_KHR)
         {
             vkDeviceWaitIdle(g_device);
@@ -926,7 +999,8 @@ namespace Video
         present.pSwapchains = &g_swapchain;
         present.pImageIndices = &imageIndex;
         r = vkQueuePresentKHR(g_queue, &present);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
+        if (r == VK_ERROR_SURFACE_LOST_KHR) g_recreateSurface = true;
+        if (SwapchainStale(r))
         {
             vkDeviceWaitIdle(g_device);
             DestroySwapchain();

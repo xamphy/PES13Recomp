@@ -119,14 +119,13 @@ namespace
         p.rt = Key('R') ? 255 : 0;
         return p;
     }
-#elif defined(__APPLE__)
+#else
+    // SDL platforms (Apple, Android): keyboard + on-screen touch controls (window_sdl.cpp).
     PadState KeyboardState()
     {
         const Video::HostPad k = Video::GetHostKeyboard();
         return { k.buttons, k.lt, k.rt, k.lx, k.ly, k.rx, k.ry };
     }
-#else
-    PadState KeyboardState() { return {}; }
 #endif
 
     // Player 1's state: real controller (if any) + keyboard + script. Returns false if
@@ -145,8 +144,8 @@ namespace
                 s.Gamepad.sThumbLX, s.Gamepad.sThumbLY, s.Gamepad.sThumbRX, s.Gamepad.sThumbRY };
             packet = s.dwPacketNumber;
         }
-#elif defined(__APPLE__)
-        // SDL gamepads (Bluetooth Xbox / PlayStation / MFi controllers on iPad and Mac).
+#else
+        // SDL gamepads (Bluetooth Xbox / PlayStation / MFi controllers on iPad, Mac and Android).
         Video::HostPad h;
         if (Video::GetHostGamepad(user, h))
         {

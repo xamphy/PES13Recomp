@@ -1,0 +1,19 @@
+// Android packaging for the PES 2013 recomp. The native part (libmain.so: game + runtime + SDL3)
+// is built by CMake with the NDK (see .github/workflows/android.yml) and copied to app/libs/arm64-v8a;
+// Gradle only adds the Java side (SDL's SDLActivity) and signs the APK.
+buildscript {
+    repositories {
+        mavenCentral()
+        google()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.3'
+    }
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+        google()
+    }
+}
