@@ -1,13 +1,14 @@
 <h1 align="center">PES13Recomp</h1>
 
 <p align="center">
-  <b>An unofficial native port of Pro Evolution Soccer 2013 (Xbox 360), built by static recompilation, for Windows and iPad.</b>
+  <b>An unofficial native port of Pro Evolution Soccer 2013 (Xbox 360), built by static recompilation, for Windows and iPad, with early Android support.</b>
 </p>
 
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D6">
   <img alt="iPadOS arm64" src="https://img.shields.io/badge/iPadOS-arm64%20(playable)-555555">
+  <img alt="Android arm64" src="https://img.shields.io/badge/Android-arm64%20(early)-3DDC84">
   <img alt="Vulkan" src="https://img.shields.io/badge/renderer-Vulkan-AC162C">
   <img alt="Metal via MoltenVK" src="https://img.shields.io/badge/iPad-Metal%20via%20MoltenVK-999999">
   <img alt="Built with XenonRecomp" src="https://img.shields.io/badge/built%20with-XenonRecomp-6F42C1">
@@ -29,14 +30,18 @@
 > [!WARNING]
 > **Work in progress.** It is playable on Windows (menus, training, exhibition matches, sound,
 > saves), but expect bugs. On iPad (M2) matches are playable at 40-45 fps with touch controls or a
-> controller; set pieces, cutscenes and the Game Plan screen still drop to 10-25 fps.
+> controller; set pieces, cutscenes and the Game Plan screen still drop to 10-25 fps. Android is
+> early: it runs on the [`android-early`](https://github.com/xamphy/PES13Recomp/tree/android-early)
+> branch and has been played on one tablet so far.
 
 ## Contents
 
 - [Features](#features)
 - [Status](#status)
+- [Branches](#branches)
 - [Building and playing on Windows](#building-and-playing-on-windows)
 - [iPad](#ipad)
+- [Android (early)](#android-early)
 - [Controls](#controls)
 - [Files and folders](#files-and-folders)
 - [Reporting a problem](#reporting-a-problem)
@@ -56,7 +61,8 @@
 | **Sound** | XAudio implemented on miniaudio |
 | **Saves and profiles** | Profiles, save data, notifications and the Xbox on-screen keyboard (player names) work |
 | **Controllers** | Xbox, PlayStation and MFi controllers via SDL / XInput, plus a keyboard; on-screen touch controls on iPad |
-| **Performance overlay** | On iPad, live FPS, frame time, memory, thermal state and battery in the letterbox bar below the picture |
+| **Performance overlay** | On iPad and Android, live FPS, frame time, memory, thermal state and battery in the letterbox bar below the picture |
+| **Android (early)** | One arm64 APK for every GPU (Adreno, Mali, Xclipse, ...) on the device's own Vulkan driver, with the launch menu, touch controls and overlay of the iPad build ([`android-early`](https://github.com/xamphy/PES13Recomp/tree/android-early) branch) |
 
 ## Status
 
@@ -67,9 +73,31 @@
 | Graphics | ✅ Menus, training, matches and cutscenes render correctly |
 | Menus, input, matches | ✅ Windows: training, exhibition matches, sound, saves (60 fps; set pieces and goal kicks locked to 30 fps by the game) |
 | iPad | 🚧 Playable on an M2 iPad Air: menus, matches, sound, touch controls. Matches run at 40-45 fps; set pieces, cutscenes and the Game Plan screen drop to 10-25 fps (performance work in progress) |
+| Android | 🧪 Early ([`android-early`](https://github.com/xamphy/PES13Recomp/tree/android-early) branch): played on a Huawei MatePad 11.5 (Snapdragon 7 Gen 1 / Adreno 644) with touch and a PS4 controller. Menus 60 fps, matches about 27 fps. Other devices untested |
 | Polish | 📋 Planned: anisotropic filtering, FXAA, resolution scaling ([docs/improvements.md](docs/improvements.md)) |
 
 Open bugs are tracked in [docs/listofbugs.md](docs/listofbugs.md).
+
+## Branches
+
+`main` only gets code that was tested on a device. Newer work lives on the other branches - check them
+for the latest changes, and read each branch's README for what it adds and what is still untested.
+
+| Branch | What it is | State |
+|---|---|---|
+| [`main`](https://github.com/xamphy/PES13Recomp/tree/main) | Windows + iPad, the last build tested on an iPad (#17) | ✅ Tested |
+| [`experimental`](https://github.com/xamphy/PES13Recomp/tree/experimental) | Everything newer for Windows / iPad / iPhone: launch menu, FSR 1 / SGSR 1 upscaling, Blur effects setting, mipmaps fix, render-pass and clear optimizations, crash logger (builds #18-#38). See its README for the list | 🧪 Checked on Windows, partly on an iPhone |
+| [`android-early`](https://github.com/xamphy/PES13Recomp/tree/android-early) | `experimental` plus **Android**: APK project, launch menu, touch controls, overlay. Guide: [docs/ANDROID.md](https://github.com/xamphy/PES13Recomp/blob/android-early/docs/ANDROID.md) | 🧪 Played on one Android tablet |
+| [`ipad-perf`](https://github.com/xamphy/PES13Recomp/tree/ipad-perf) | iPad performance fixes from build #17 | Merged into `main` (kept for history) |
+
+To build a branch, clone it directly:
+
+```bat
+git clone --recursive -b experimental https://github.com/xamphy/PES13Recomp.git
+```
+
+or switch an existing checkout with `git checkout <branch>` followed by
+`git submodule update --init --recursive`.
 
 ## Building and playing on Windows
 
@@ -145,6 +173,22 @@ succeeds and the game is playable - menus, exhibition matches and sound work.
   in the black bar under the 16:9 picture.
 - Switching to another app pauses GPU work (iPadOS does not allow it in the background) and the
   game resumes when you come back.
+
+## Android (early)
+
+Android support is on the [`android-early`](https://github.com/xamphy/PES13Recomp/tree/android-early)
+branch. One arm64 APK covers every GPU: it uses the device's own Vulkan driver (Vulkan 1.1, Android 9 or
+newer) and translates the Xbox shaders on the device. Like the iPad app, the APK contains code recompiled
+from the game, so it is never published here: you build it with the Android NDK from your own disc and
+install it yourself. Building, installing, copying the game files and sending logs are described in
+[docs/ANDROID.md](https://github.com/xamphy/PES13Recomp/blob/android-early/docs/ANDROID.md).
+
+- **Tested:** a Huawei MatePad 11.5 (Snapdragon 7 Gen 1, Adreno 644, HarmonyOS 3.1). Menus run at 60 fps,
+  light 3D scenes at 40-60, matches at about 27 fps (GPU-bound, faster than an iPhone 13 Pro).
+- **Included:** the launch menu (works with touch or a controller), touch controls, the performance
+  overlay, the Blur effects and upscaling settings, and Bluetooth controllers.
+- **Not yet:** other phones and tablets (Mali and Xclipse GPUs are untested), and switching to another
+  app and back is still being fixed.
 
 ## Controls
 
